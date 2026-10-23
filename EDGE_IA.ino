@@ -108,20 +108,20 @@ const Etapa SEQUENCIA[] = {
 constexpr size_t TOTAL_ETAPAS = sizeof(SEQUENCIA) / sizeof(SEQUENCIA[0]);
 
 void pararEsteira() { 
-
-    digitalWrite(PIN_RELE, RELE_DESLIGADO); 
-
+  digitalWrite(PIN_RELE, RELE_DESLIGADO); 
 }
 
 void mover(uint8_t braco, const Pose &p) {
   const int alvo[4] = {p.base, p.ombro, p.cotovelo, p.garra};
   int maiorDeslocamento = 0;
+  
   for (uint8_t eixo = 0; eixo < 4; ++eixo) {
     origem[eixo] = posicao[braco][eixo];
     const ServoCfg &c = CONFIG_BRACOS[braco][eixo];
     destino[eixo] = constrain(alvo[eixo], c.minimo, c.maximo);
     maiorDeslocamento = max(maiorDeslocamento, abs(destino[eixo] - origem[eixo]));
   }
+  
   bracoMovendo = braco;
   // Smoothstep tem velocidade maxima 1,5 vezes a velocidade media.
   duracaoMovimento = max(uint32_t(1), uint32_t(1500.0f * maiorDeslocamento / VELOCIDADE_GRAUS_S));
@@ -174,12 +174,18 @@ void atualizar() {
   espera = e.tempo;
 }
 
-void setup() {
+void config_pins(){
+
   digitalWrite(PIN_RELE, RELE_DESLIGADO);
   pinMode(PIN_RELE, OUTPUT);
   pararEsteira();
+}
+
+void setup() {
+  config_pins();
   Serial.begin(115200);
   pronto = true;
+  
   // Validar antes de conectar qualquer servo.
   for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
     for (uint8_t eixo = 0; eixo < 4; ++eixo) {
@@ -196,6 +202,7 @@ void setup() {
     Serial.println("Configuracao invalida: confira pinos exclusivos, limites e posicoes iniciais.");
     return;
   }
+  
   for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
     for (uint8_t eixo = 0; eixo < 4; ++eixo) {
       const ServoCfg &c = CONFIG_BRACOS[b][eixo];
