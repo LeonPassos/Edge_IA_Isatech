@@ -1,82 +1,85 @@
-﻿# Dois bracos de quatro servos e esteira por rele
+﻿# Controle dos bracos e esteira com FreeRTOS
 
-ESP32 DevKit classica, oito servos posicionais e modulo rele.
-Instale ESP32Servo pelo Gerenciador de Bibliotecas da Arduino IDE.
-Referencia: https://github.com/madhephaestus/ESP32Servo
+Sketch Arduino para ESP32 com ESP32Servo. Usa o FreeRTOS que ja acompanha
+o core Arduino-ESP32; nao e necessario instalar outro RTOS.
 
-| Eixo | Braco 1 (entrada) | Braco 2 (saida) |
+## Organizacao
+
+- taskControle: prioridade 2, stack de 4096 bytes, periodo solicitado de 10 ms
+  usando vTaskDelayUntil. Processa comandos, atualiza a rampa suave e avanca
+  a sequencia. E a unica tarefa que acessa os atuadores e o estado do ciclo.
+- taskSerial: prioridade 1, stack de 4096 bytes. Recebe i/p a 115200 baud,
+  envia notificacoes de bits ao controle e imprime mensagens de uma fila.
+- Fila de 24 mensagens: transporta ponteiros para textos estaticos. O envio
+  nao bloqueia o controle; mensagens sao descartadas se a fila estiver cheia.
+- setup valida a montagem, inicializa os servos e cria os recursos RTOS.
+  Falha de alocacao mantem a esteira desligada e nao aceita ciclos.
+- loop fica bloqueado. As tarefas sao criadas sem fixar um nucleo.
+
+Se iniciar e parar estiverem pendentes na mesma leitura, parar prevalece.
+Comandos iguais pendentes sao agrupados, sem enfileirar ciclos futuros.
+O periodo e quantizado pelo tick do FreeRTOS e pode sofrer atraso de
+escalonamento; nao foi medida uma garantia de prazo no hardware.
+As rampas e tempos da sequencia continuam baseados em millis().
+
+## Configuracao preservada da versao funcional
+
+Somente o primeiro braco esta ativo (BRACOS_ATIVOS = 1).
+
+| Eixo | GPIO | Angulo inicial |
 | --- | --- | --- |
-| Base | GPIO 13 | GPIO 21 |
-| Ombro | GPIO 14 | GPIO 22 |
-| Cotovelo | GPIO 18 | GPIO 25 |
-| Garra | GPIO 19 | GPIO 26 |
+| Base | 13 | 90 |
+| Ombro | 14 | 90 |
+| Cotovelo | 27 | 90 |
+| Garra | 26 | 135 |
 
-Entrada do modulo rele: GPIO 27. RELE_LIGADO = LOW por padrao; altere para
-HIGH se o modulo for ativo alto. Contatos COM e NO permitem interromper
-a alimentacao com o rele desenergizado. O rele controla somente liga/desliga.
+Rele no GPIO 25, ativo em LOW. Velocidade comandada: 70 graus/s.
+Garra 1 aberta: 30 graus; fechada: 120 graus. Os limites individuais estao
+em cfg; cfgSegundoBraco aguarda pinos exclusivos antes de ativar dois bracos.
+As poses, tabela de etapas e calculo da rampa foram mantidos no refactor.
 
-Use modulo com entrada compativel com 3,3 V; nao conecte bobina ao GPIO.
-Dimensione contatos para a corrente de partida do motor DC e use supressao
-de transientes adequada ao motor e sua polaridade. Garanta entrada desligada
-durante reset com polarizacao externa adequada ao modulo. A alimentacao do
-motor passa pelos contatos, nao pela ESP32.
+## Operacao
 
-Alimente os oito servos com fonte externa na tensao indicada pelo fabricante,
-dimensionada para a corrente dos servos sob carga. Nao use o 3V3 da ESP32.
-Una GND dos servos e ESP32; ligue o lado de controle do rele conforme o modulo.
+Instale ESP32Servo pelo Gerenciador de Bibliotecas da Arduino IDE.
+No Monitor Serial em 115200 baud, i inicia um ciclo e p cancela a sequencia,
+desliga a esteira e interrompe a rampa no ultimo angulo enviado. Isso nao
+mede nem interrompe instantaneamente o movimento mecanico do servo.
+Reposicione os bracos e o cubo antes de reiniciar um ciclo cancelado.
 
-## Operacao e calibracao
+O braco 1 pega, levanta, entrega e retorna; a esteira transporta por tempo;
+o braco 2 executa a retirada quando configurado e ativado. MOVIMENTO_MS e
+GARRA_MS sao pausas de acomodacao apos os movimentos. Sem sensores, nao ha
+confirmacao de pega ou chegada. Na energizacao pode haver deslocamento
+rapido ate a posicao inicial, pois a posicao real nao e lida.
 
-Os angulos sao EXEMPLOS, nao coordenadas validadas para seu braco. Calibre
-as poses no inicio do sketch, sem carga, antes de executar a sequencia.
-Ordem de cada pose: base, ombro, cotovelo, garra. Ajuste tambem ABERTA_1/2 e
-FECHADA_1/2; abrir e fechar podem exigir sentidos diferentes entre os bracos.
-Respeite limites mecanicos e a faixa de pulsos dos servos (1000 a 2000 us
-neste exemplo). Os servos podem se mover ao inicializar.
+Use fonte externa adequada aos servos, com GND comum a ESP32. Nao alimente
+motores pelo 3V3. Use modulo rele compativel com logica de 3,3 V, contatos
+adequados a corrente de partida e supressao de transientes do motor DC.
 
-Calibre REPOUSO_1/2 para manter os bracos fora da area de transporte.
-As poses ACIMA_* devem permitir levantar o cubo antes de girar a base.
-Cada pose comanda seus eixos juntos; confira todo o trajeto para evitar
-colisoes. MOVIMENTO_MS deve permitir que o eixo mais lento termine.
+## MQTT
 
-Monitor Serial: 115200 baud. Envie i para um ciclo:
-1. Braco 1 aproxima, desce, fecha garra, levanta e gira ate a esteira.
-2. Desce, abre garra, levanta e retorna ao repouso.
-3. Rele liga por ESTEIRA_MS, desliga e espera ACOMODAR_MS.
-4. Braco 2 aproxima, desce, fecha garra, levanta e leva ate a saida.
-5. Desce, solta, levanta e retorna. Aguarda outro i.
+mqtt.cpp conecta ao Wi-Fi e ao broker test.mosquitto.org:1883 com
+PubSubClient, em uma tarefa propria (prioridade 1, stack 6144 bytes) que
+reconecta sozinha a cada 5 s. Somente essa tarefa usa o cliente MQTT.
 
-p cancela e desliga a esteira, mas os servos mantem os ultimos alvos e podem
-terminar movimentos ja comandados. Nao e uma parada de emergencia.
-Reposicione os bracos e o cubo antes de reiniciar apos cancelamento.
+| Topico | Direcao | Conteudo |
+| --- | --- | --- |
+| edge_ia/comando | recebe | i ou iniciar; p ou parar |
+| edge_ia/status | publica | as mesmas mensagens do Monitor Serial |
+| edge_ia/estado | publica (retido) | online; offline via Last Will |
 
-A sequencia usa millis() e cede tempo ao FreeRTOS, sem esperas longas.
-Sem sensores, nao confirma pega, chegada ou travamento. Ajuste ESTEIRA_MS
-e ACOMODAR_MS para a velocidade, distancia e inercia reais da esteira.
+Teste: `mosquitto_sub -h test.mosquitto.org -t "edge_ia/#" -v` e
+`mosquitto_pub -h test.mosquitto.org -t edge_ia/comando -m i`.
+O broker e publico: qualquer pessoa pode enviar comandos nesses topicos.
+Credenciais Wi-Fi e IP estatico opcional ficam no inicio de mqtt.cpp.
 
-Nao compilado nem testado em hardware neste ambiente (Arduino CLI e
-PlatformIO indisponiveis).
+## Verificacao
 
-## Movimento suave: configuracao atual
+Comparacao automatizada confirmou preservacao da configuracao, poses,
+sequencia, inicializacao dos servos e calculo da rampa. Revisado isolamento
+do controle e tratamento de falhas de criacao dos recursos. Compila com
+arduino-cli (esp32:esp32 3.3.12); ainda nao testado em hardware.
 
-Teste com um braco: base 13, ombro 14, cotovelo 27, garra 26.
-Rele transferido para GPIO 23 para eliminar conflito com o cotovelo.
-Esta configuracao substitui a tabela anterior. Antes de ativar dois bracos,
-preencha cfgSegundoBraco com GPIOs livres e exclusivos.
-
-VELOCIDADE_GRAUS_S = 25: use 15 para mais lento ou 35 para mais rapido.
-Os eixos chegam juntos com aceleracao e desaceleracao suaves, atualizados
-a cada 20 ms sem bloquear. MOVIMENTO_MS e GARRA_MS agora sao pausas de
-acomodacao APOS o movimento. p cancela a rampa no ultimo angulo enviado.
-Sem leitura de posicao real, a primeira energizacao ainda pode causar
-movimento rapido ate o repouso; a suavizacao vale para movimentos seguintes.
-Alteracao nao compilada nem testada em hardware.
-
-
-A configuracao ServoCfg cfg[4] segue a referencia fornecida: nome, GPIO,
-angulo minimo, angulo maximo e angulo inicial. Todos iniciam em 90 graus.
-Os limites individuais sao aplicados aos alvos do movimento suave.
-A pose de repouso do ciclo continua separada da posicao inicial (a garra
-vai suavemente de 90 para ABERTA_1 no primeiro comando de repouso).
-O segundo braco tem pinos -1 ate ser configurado em cfgSegundoBraco.
-Pinos repetidos, conflito com o rele e limites invalidos impedem a inicializacao.
+Referencias:
+- https://github.com/madhephaestus/ESP32Servo
+- https://docs.espressif.com/projects/esp-idf/en/v5.0/esp32/api-reference/system/freertos.html

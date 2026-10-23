@@ -1,6 +1,7 @@
-﻿#include <Arduino.h>
-#include <ESP32Servo.h>
+﻿#include <ESP32Servo.h>
 #include <math.h>
+#include "tipos.h"
+#include "mqtt.h"
 
 // ESP32 DevKit classica. Ordem: BASE, OMBRO, COTOVELO, GARRA.
 struct ServoCfg {
@@ -53,6 +54,18 @@ constexpr Pose ACIMA_ESTEIRA_2 = {30, 90, 90, ABERTA_2};
 constexpr Pose PEGA_ESTEIRA = {30, 120, 60, ABERTA_2};
 constexpr Pose ACIMA_SAIDA = {150, 90, 90, FECHADA_2};
 constexpr Pose ENTREGA_SAIDA = {150, 120, 60, FECHADA_2};
+
+// Depois do setup, somente taskControle acessa atuadores e estado da sequencia.
+constexpr uint32_t PERIODO_CONTROLE_MS = 10;
+TaskHandle_t controleHandle = nullptr;
+QueueHandle_t filaMensagens = nullptr;
+
+// Apenas literais estaticos sao enviados: os ponteiros continuam validos.
+// Log nunca bloqueia o controle; fila cheia descarta a mensagem.
+void registrar(const char *mensagem) {
+  if (filaMensagens != nullptr) xQueueSend(filaMensagens, &mensagem, 0);
+  publicarMqtt(mensagem);
+}
 
 Servo servos[2][4];
 bool pronto = false;
@@ -157,7 +170,7 @@ void atualizar() {
   if (proximaEtapa >= TOTAL_ETAPAS) {
     pararEsteira();
     executando = false;
-    Serial.println("Ciclo concluido. Envie i para repetir.");
+    registrar("Ciclo concluido. Envie i para repetir.");
     return;
   }
   const Etapa &e = SEQUENCIA[proximaEtapa++];
@@ -169,7 +182,7 @@ void atualizar() {
     case LIGAR_ESTEIRA: digitalWrite(PIN_RELE, RELE_LIGADO); break;
     case DESLIGAR_ESTEIRA: pararEsteira(); break;
   }
-  Serial.println(e.mensagem);
+  registrar(e.mensagem);
   inicio = millis();
   espera = e.tempo;
 }
@@ -179,6 +192,57 @@ void config_pins(){
   digitalWrite(PIN_RELE, RELE_DESLIGADO);
   pinMode(PIN_RELE, OUTPUT);
   pararEsteira();
+}
+
+// A notificacao transporta comandos sem compartilhar variaveis de controle.
+// Se i e p chegarem no mesmo periodo, p prevalece.
+void taskControle(void *parameter) {
+  (void)parameter;
+  TickType_t ultimaExecucao = xTaskGetTickCount();
+  const TickType_t periodo = max(TickType_t(1), pdMS_TO_TICKS(PERIODO_CONTROLE_MS));
+  for (;;) {
+    uint32_t comandos = 0;
+    xTaskNotifyWait(0, UINT32_MAX, &comandos, 0);
+    if (comandos & CMD_PARAR) {
+      pararEsteira();
+      executando = false;
+      emMovimento = false;
+      registrar("Cancelado. Reposicione bracos e cubo antes de reiniciar.");
+    } else if (comandos & CMD_INICIAR) {
+      if (executando) registrar("Ciclo em andamento.");
+      else {
+        pararEsteira();
+        proximaEtapa = 0;
+        espera = 0;
+        inicio = millis();
+        executando = true;
+      }
+    }
+    atualizarMovimento();
+    atualizar();
+    vTaskDelayUntil(&ultimaExecucao, periodo);
+  }
+}
+
+// Serial fica fora do controle para que impressoes nao atrasem os servos.
+void taskSerial(void *parameter) {
+  (void)parameter;
+  for (;;) {
+    // Limite por iteracao evita monopolizar CPU com entrada continua.
+    for (uint8_t n = 0; n < 32 && Serial.available() > 0; ++n) {
+      const char comando = Serial.read();
+      if (comando == 'p' || comando == 'P') {
+        xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
+      } else if (comando == 'i' || comando == 'I') {
+        xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);
+      }
+    }
+    const char *mensagem = nullptr;
+    for (uint8_t n = 0; n < 8 && xQueueReceive(filaMensagens, &mensagem, 0) == pdTRUE; ++n) {
+      Serial.println(mensagem);
+    }
+    vTaskDelay(max(TickType_t(1), pdMS_TO_TICKS(10)));
+  }
 }
 
 void setup() {
@@ -218,30 +282,41 @@ void setup() {
     Serial.println("Falha ao conectar servos; inicio bloqueado.");
     return;
   }
-  // Os servos podem se mover ao energizar/inicializar.
+
+  filaMensagens = xQueueCreate(24, sizeof(const char *));
+  if (filaMensagens == nullptr) {
+    pararEsteira();
+    Serial.println("Falha ao criar fila RTOS. Reinicie a ESP32.");
+    return;
+  }
+
+  if (xTaskCreate(taskControle, "Controle", 4096, nullptr, 2, &controleHandle) != pdPASS) {
+    vQueueDelete(filaMensagens);
+    filaMensagens = nullptr;
+    pararEsteira();
+    Serial.println("Falha ao criar tarefa de controle. Reinicie a ESP32.");
+    return;
+  }
+
+  // Controle ainda esta ocioso: nenhum comando foi enviado.
   Serial.println("i = iniciar um ciclo; p = cancelar. Serial: 115200 baud.");
+  if (xTaskCreate(taskSerial, "Serial", 4096, nullptr, 1, nullptr) != pdPASS) {
+    vTaskDelete(controleHandle);
+    controleHandle = nullptr;
+    vQueueDelete(filaMensagens);
+    filaMensagens = nullptr;
+    pararEsteira();
+    Serial.println("Falha ao criar tarefa Serial. Reinicie a ESP32.");
+    return;
+  }
+
+  // Wi-Fi/MQTT conectam em segundo plano; falha de rede nao bloqueia a Serial.
+  if (!iniciarMqtt(controleHandle)) {
+    Serial.println("Falha ao iniciar MQTT; controle somente pela Serial.");
+  }
 }
 
 void loop() {
-  while (Serial.available() > 0) {
-    const char comando = Serial.read();
-    if (comando == 'p' || comando == 'P') {
-      pararEsteira();
-      executando = false;
-      emMovimento = false; // Congela no ultimo angulo enviado.
-      Serial.println("Cancelado. Reposicione bracos e cubo antes de reiniciar.");
-    } else if ((comando == 'i' || comando == 'I') && pronto) {
-      if (executando) Serial.println("Ciclo em andamento.");
-      else {
-        pararEsteira();
-        proximaEtapa = 0;
-        espera = 0;
-        inicio = millis();
-        executando = true;
-      }
-    }
-  }
-  atualizarMovimento();
-  atualizar();
-  vTaskDelay(pdMS_TO_TICKS(10));
+  // O trabalho fica nas tarefas; bloquear evita gastar CPU no loop do Arduino.
+  vTaskDelay(portMAX_DELAY);
 }

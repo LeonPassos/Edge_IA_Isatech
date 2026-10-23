@@ -1,0 +1,7 @@
+Comandos Arduino cli
+
+.\arduino-cli.exe compile --fqbn esp32:esp32:esp32 --output-dir ./build .
+
+.\arduino-cli.exe upload -p COM5 --fqbn esp32:esp32:esp32 --input-dir ./build .
+
+.\arduino-cli.exe monitor -p COM5 --config baudrate=115200
