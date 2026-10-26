@@ -14,6 +14,7 @@
 #include "mqtt/mqtt.h"
 #include "comando_json.h"
 #include "wifi/wifi.h"
+#include "main.h"
 
 static const char *TAG = "main";
 
@@ -108,7 +109,7 @@ static TickType_t ticks(uint32_t ms) {
 // Log nunca bloqueia o controle; fila cheia descarta a mensagem.
 static void registrar(const char *mensagem) {
   if (filaMensagens != NULL) xQueueSend(filaMensagens, &mensagem, 0);
-  publicarMqtt(mensagem);
+  // publicarMqtt(mensagem);
 }
 
 static Servo servos[2][4];
@@ -448,9 +449,8 @@ static void task_esteira_with_ultrasonic(void *parameter) {
 
 void app_main(void) {
 
+  // Primeiro: cria o loop de eventos usado pelo MQTT.
   wifi_init_sta();
-
-  return;
 
   // bool done = true;
   
@@ -487,42 +487,53 @@ void app_main(void) {
   //   return;
   // }
 
-  // filaMensagens = xQueueCreate(24, sizeof(const char *));
-  // filaComandos = xQueueCreate(8, sizeof(ComandoJson));
-  // filaSensor = xQueueCreate(1, sizeof(LeituraSensor));
-  // if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL) {
-  //   if (filaMensagens) vQueueDelete(filaMensagens);
-  //   if (filaComandos) vQueueDelete(filaComandos);
-  //   if (filaSensor) vQueueDelete(filaSensor);
-  //   filaSensor = NULL;
-  //   filaMensagens = filaComandos = NULL;
-  //   pararEsteira();
-  //   ESP_LOGE(TAG, "Falha ao criar fila RTOS. Reinicie a ESP32.");
-  //   return;
-  // }
+  filaMensagens = xQueueCreate(24, sizeof(const char *));
+  filaComandos = xQueueCreate(8, sizeof(ComandoJson));
+  filaSensor = xQueueCreate(1, sizeof(LeituraSensor));
+  if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL) {
+    if (filaMensagens) vQueueDelete(filaMensagens);
+    if (filaComandos) vQueueDelete(filaComandos);
+    if (filaSensor) vQueueDelete(filaSensor);
+    filaSensor = NULL;
+    filaMensagens = filaComandos = NULL;
+    pararEsteira();
+    ESP_LOGE(TAG, "Falha ao criar fila RTOS. Reinicie a ESP32.");
+    return;
+  }
 
-  // if (xTaskCreate(taskControle, "Controle", 4096, NULL, 2, &controleHandle) != pdPASS) {
-  //   vQueueDelete(filaMensagens);
-  //   vQueueDelete(filaComandos);
-  //   vQueueDelete(filaSensor);
-  //   filaSensor = NULL;
-  //   filaComandos = NULL;
-  //   filaMensagens = NULL;
-  //   pararEsteira();
-  //   ESP_LOGE(TAG, "Falha ao criar tarefa de controle. Reinicie a ESP32.");
-  //   return;
-  // }
+  if (xTaskCreate(taskControle, "Controle", 4096, NULL, 2, &controleHandle) != pdPASS) {
+    vQueueDelete(filaMensagens);
+    vQueueDelete(filaComandos);
+    vQueueDelete(filaSensor);
+    filaSensor = NULL;
+    filaComandos = NULL;
+    filaMensagens = NULL;
+    pararEsteira();
+    ESP_LOGE(TAG, "Falha ao criar tarefa de controle. Reinicie a ESP32.");
+    return;
+  }
 
-  // // Sem esta tarefa as mensagens ainda saem pelo MQTT; a fila cheia apenas descarta.
-  // if (xTaskCreate(taskLog, "Log", 4096, NULL, 1, NULL) != pdPASS) {
-  //   ESP_LOGE(TAG, "Falha ao criar tarefa de log; mensagens somente por MQTT.");
-  // }
+  // Sem esta tarefa as mensagens ainda saem pelo MQTT; a fila cheia apenas descarta.
+  if (xTaskCreate(taskLog, "Log", 4096, NULL, 1, NULL) != pdPASS) {
+    ESP_LOGE(TAG, "Falha ao criar tarefa de log; mensagens somente por MQTT.");
+  }
 
-  // // Wi-Fi/MQTT conectam em segundo plano. MQTT e a unica entrada de comandos.
-  // if (!mqtt_init(controleHandle, filaComandos)) {
-  //   ESP_LOGE(TAG, "Falha ao iniciar MQTT; nenhum comando sera recebido. Reinicie a ESP32.");
-  // }
+  // MQTT conecta quando o Wi-Fi recebe IP. E a unica entrada de comandos.
 
+  mqtt_init(&(mqtt_config_t){
+    .uri = MQTT_BROKER_URI,
+    .client_id = NULL, // Gera "esp32-<MAC>"
+    .keepalive_s = 120,
+    .reconexao_ms = 10000,
+    .prioridade_tarefa = 5,
+    .lwt_topico = "isatech/status",
+    .lwt_mensagem = "offline",
+    .lwt_qos = 0,
+    .lwt_retain = true,
+    .ctx = NULL
+  });
+
+  mqtt_start();
   // if (xTaskCreate(task_esteira_with_ultrasonic, "EsteiraUltrasonic", 4096, NULL, 1, NULL) == pdPASS) {
   //   ESP_LOGE(TAG, "Task criada com sucesso.");
   // }
