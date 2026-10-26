@@ -1,6 +1,7 @@
 #include "mqtt.h"
+#include "app_config.h"
+#include "comando_json.h"
 
-#include <ctype.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,7 +15,8 @@
 // Rede e broker.
 static const char *WIFI_SSID = "Isatech";
 static const char *WIFI_SENHA = "@Isatech2027@";
-static const char *MQTT_URI = "mqtt://test.mosquitto.org:1883";
+// static const char *MQTT_URI = "mqtt://test.mosquitto.org:1883";
+static const char *MQTT_URI = "mqtt://192.168.1.179:1883";
 
 // IP estatico opcional. Com false, o roteador entrega o IP por DHCP.
 // No modo estatico o gateway tambem e usado como DNS.
@@ -23,18 +25,19 @@ static const char *MQTT_URI = "mqtt://test.mosquitto.org:1883";
 #define GATEWAY  ESP_IP4TOADDR(192, 168, 0, 1)
 #define SUBNET   ESP_IP4TOADDR(255, 255, 255, 0)
 
-// test.mosquitto.org e publico: qualquer um pode publicar nestes topicos.
+// Topicos da aplicacao no broker configurado.
 static const char *TOPICO_COMANDO = "edge_ia/comando"; // i/iniciar, p/parar
 static const char *TOPICO_STATUS = "edge_ia/status";   // mensagens do ciclo
 static const char *TOPICO_ESTADO = "edge_ia/estado";   // online/offline (retido)
 
 #define RECONEXAO_MS 5000
-#define KEEPALIVE_S 15 // Mesmo padrao do PubSubClient.
+#define KEEPALIVE_S 15
 #define TAMANHO_FILA 24
 
 static esp_mqtt_client_handle_t mqtt = NULL;
 static TaskHandle_t controleHandle = NULL;
 static QueueHandle_t filaMqtt = NULL;
+static QueueHandle_t filaComandos = NULL;
 static atomic_bool mqttConectado = false;
 // Acessados somente no loop de eventos padrao.
 static bool wifiConectado = false;
@@ -45,22 +48,53 @@ void publicarMqtt(const char *mensagem) {
 }
 
 static void receberMensagem(esp_mqtt_event_handle_t ev) {
-  if (ev->topic_len != (int)strlen(TOPICO_COMANDO) ||
-      strncmp(ev->topic, TOPICO_COMANDO, ev->topic_len) != 0) return;
-  char texto[16] = {0};
-  const int n = ev->data_len < (int)sizeof(texto) - 1 ? ev->data_len : (int)sizeof(texto) - 1;
-  for (int k = 0; k < n; ++k) texto[k] = tolower((unsigned char)ev->data[k]);
-
-  if (strcmp(texto, "p") == 0 || strcmp(texto, "parar") == 0) {
-    xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
-  } else if (strcmp(texto, "i") == 0 || strcmp(texto, "iniciar") == 0) {
-    xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);  
-  } else if (strcmp(texto, "mover_garra") == 0) {
-    
+  static char texto[COMANDO_JSON_MAX + 1];
+  static int recebidos = 0, total = 0;
+  static bool retido;
+  if (ev->current_data_offset == 0) {
+    recebidos = total = 0;
+    if (ev->topic_len != (int)strlen(TOPICO_COMANDO) || !ev->topic || memcmp(ev->topic, TOPICO_COMANDO, ev->topic_len) != 0){
+      return;
+    } 
+    if (ev->total_data_len <= 0 || ev->total_data_len > COMANDO_JSON_MAX) {
+      publicarMqtt("Comando vazio ou maior que 256 bytes.");
+      return;
+    }
+    total = ev->total_data_len;
+    retido = ev->retain;
   }
-  
-  else {
-    esp_mqtt_client_publish(mqtt, TOPICO_STATUS, "Comando desconhecido. Use i/iniciar ou p/parar.", 0, 0, 0);
+  if (!total) {
+    return;
+  }
+  if (ev->current_data_offset != recebidos || ev->total_data_len != total || ev->data_len <= 0 || ev->data_len > total - recebidos || !ev->data) {
+    recebidos = total = 0;
+    return;
+  }
+  memcpy(texto + recebidos, ev->data, ev->data_len);
+  recebidos += ev->data_len;
+  if (recebidos != total) return;
+  const int tamanho = total;
+  recebidos = total = 0;
+  texto[tamanho] = '\0';
+  if (retido || memchr(texto, '\0', tamanho)) {
+    publicarMqtt("Comando retido ou invalido ignorado. Publique sem retain.");
+    return;
+  }
+  if (strcmp(texto, "p") == 0 || strcmp(texto, "parar") == 0 || strcmp(texto, "P") == 0) {
+    xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
+  } else if (strcmp(texto, "i") == 0 || strcmp(texto, "iniciar") == 0 || strcmp(texto, "I") == 0) {
+    xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);
+  } else {
+    ComandoJson comando;
+    if (!comandoJsonParse(texto, tamanho, &comando)) {
+      publicarMqtt("JSON invalido. Consulte docs/comandos-json.md.");
+    } else if (comando.acao == JSON_PARAR) {
+      xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
+    } else if (comando.acao == JSON_INICIAR) {
+      xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);
+    } else if (xQueueSend(filaComandos, &comando, 0) != pdTRUE) {
+      publicarMqtt("Fila de comandos cheia. Tente novamente.");
+    }
   }
 }
 
@@ -81,8 +115,22 @@ static void eventoMqtt(void *arg, esp_event_base_t base, int32_t id, void *dados
       printf("MQTT desconectado; nova tentativa em %lu ms.\n", (unsigned long)RECONEXAO_MS);
       break;
     case MQTT_EVENT_ERROR:
-      printf("Falha MQTT (tipo %d, codigo %d).\n", (int)ev->error_handle->error_type,
-             (int)ev->error_handle->connect_return_code);
+      if (!ev->error_handle) {
+        puts("Falha MQTT sem detalhes de transporte.");
+        break;
+      }
+      printf("Falha MQTT em %s (tipo %d).\n", MQTT_URI, (int)ev->error_handle->error_type);
+      if (ev->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+        const int erro = ev->error_handle->esp_transport_sock_errno;
+        printf("Transporte: esp_err=0x%x (%s), stack=0x%x, socket_errno=%d (%s).\n",
+               (unsigned int)ev->error_handle->esp_tls_last_esp_err,
+               esp_err_to_name(ev->error_handle->esp_tls_last_esp_err),
+               (unsigned int)ev->error_handle->esp_tls_stack_err,
+               erro, erro ? strerror(erro) : "nao informado");
+      } else if (ev->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+        printf("Broker recusou conexao MQTT: codigo %d.\n",
+               (int)ev->error_handle->connect_return_code);
+      }
       break;
     case MQTT_EVENT_DATA:
       receberMensagem(ev);
@@ -107,17 +155,16 @@ static void eventoRede(void *arg, esp_event_base_t base, int32_t id, void *dados
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *ev = dados;
     wifiConectado = true;
-    printf("Wi-Fi conectado. IP: " IPSTR "\n", IP2STR(&ev->ip_info.ip));
+    printf("Wi-Fi conectado. IP: " IPSTR ", mascara: " IPSTR ", gateway: " IPSTR "\n", IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.netmask), IP2STR(&ev->ip_info.gw));
+    printf("Broker MQTT: %s\n", MQTT_URI);
     if (!mqttIniciado) mqttIniciado = esp_mqtt_client_start(mqtt) == ESP_OK;
   }
 }
 
 static bool conectarWifi(void) {
-  esp_err_t err = nvs_flash_init();
-  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    nvs_flash_erase();
-    err = nvs_flash_init();
-  }
+
+  esp_err_t err = ESP_OK;
+
   if (err != ESP_OK) return false;
   if (esp_netif_init() != ESP_OK) return false;
   err = esp_event_loop_create_default();
@@ -155,7 +202,7 @@ static bool conectarWifi(void) {
 }
 
 static bool criarClienteMqtt(void) {
-  // Mesmo ID do Arduino: MAC de fabrica lido como inteiro de 64 bits.
+  // Identificador exclusivo baseado no MAC de fabrica.
   uint64_t mac = 0;
   esp_efuse_mac_get_default((uint8_t *)&mac);
   static char id[32];
@@ -193,7 +240,9 @@ static void taskMqtt(void *parameter) {
   }
 }
 
-bool iniciarMqtt(TaskHandle_t controle) {
+bool mqtt_init(TaskHandle_t controle, QueueHandle_t comandos) {
+  if (!controle || !comandos) return false;
+  filaComandos = comandos;
   controleHandle = controle;
   if (!criarClienteMqtt()) return false;
 

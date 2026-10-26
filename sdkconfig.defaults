@@ -1,9 +1,9 @@
-# Tick de 1 ms, igual ao core Arduino: periodo de 10 ms do controle fica exato.
+# Tick do FreeRTOS de 1 ms para o periodo de controle de 10 ms.
 CONFIG_FREERTOS_HZ=1000
 
 # Wi-Fi + MQTT nao cabem com folga na particao padrao de 1 MB.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
-# Console limpo como no Arduino: somente avisos e erros dos componentes do IDF.
-CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+# Logs a partir de INFO, para acompanhar Wi-Fi e aplicacao no monitor.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

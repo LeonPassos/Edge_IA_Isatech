@@ -1,4 +1,6 @@
 #include "servo.h"
+#include <stdint.h>
+#include <esp_log.h>
 
 #define MODO          LEDC_LOW_SPEED_MODE
 #define TIMER         LEDC_TIMER_0
@@ -9,7 +11,9 @@
 // Todos os servos compartilham o mesmo timer de 50 Hz.
 static bool configurarTimer(void) {
   static bool configurado = false;
-  if (configurado) return true;
+  if (configurado) {
+    return true;
+  }
   ledc_timer_config_t t = {0};
   t.speed_mode = MODO;
   t.duty_resolution = RESOLUCAO;
@@ -17,6 +21,7 @@ static bool configurarTimer(void) {
   t.freq_hz = FREQUENCIA_HZ;
   t.clk_cfg = LEDC_AUTO_CLK;
   configurado = ledc_timer_config(&t) == ESP_OK;
+
   return configurado;
 }
 
@@ -28,7 +33,7 @@ bool servoConectar(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxU
   c.channel = canal;
   c.intr_type = LEDC_INTR_DISABLE;
   c.timer_sel = TIMER;
-  c.duty = 0; // Sem pulso ate o primeiro write_servo.
+  c.duty = 0; // Sem pulso ate o primeiro servoDefinirAngulo.
   if (ledc_channel_config(&c) != ESP_OK) return false;
   s->canal = canal;
   s->minUs = minUs;
@@ -37,7 +42,7 @@ bool servoConectar(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxU
   return true;
 }
 
-void write_servo(Servo *s, int angulo) {
+void servoDefinirAngulo(Servo *s, int angulo) {
   if (!s->conectado) return;
   if (angulo < 0) angulo = 0;
   if (angulo > 180) angulo = 180;
@@ -47,17 +52,47 @@ void write_servo(Servo *s, int angulo) {
   ledc_update_duty(MODO, s->canal);
 }
 
-esp_err_t servo_control_mqtt(Servo *s, int angulo, const char *nome) {
-  char mensagem[64];
+esp_err_t servo_control_base(Servo *s, int angulo) {
 
-  if (!s->conectado) {
-    ESP_LOGE("servo_control_mqtt", "Servo %s nao conectado", nome);
-    return ESP_FAIL;
+  if(angulo < 0 || angulo > 135) {
+    ESP_LOGE("servo_control_base", "Angulo %d fora do intervalo permitido (0-135)", angulo);
+    return ESP_ERR_INVALID_ARG;
   }
-  write_servo(s, angulo);
+  servoDefinirAngulo(s, angulo);
 
-  //snprintf(mensagem, sizeof(mensagem), "%s: %d", nome, angulo);
-  //publicarMqtt(mensagem);
+  return ESP_OK;
+}
+
+esp_err_t servo_control_ombro(Servo *s, int angulo) {
+
+  if(angulo < 0 || angulo > 135) {
+    ESP_LOGE("servo_control_ombro", "Angulo %d fora do intervalo permitido (0-135)", angulo);
+    return ESP_ERR_INVALID_ARG;
+  }
+  servoDefinirAngulo(s, angulo);
+
+  return ESP_OK;
+}
+
+esp_err_t servo_control_cotovelo(Servo *s, int angulo) {
+
+  if(angulo < 0 || angulo > 135) {
+    ESP_LOGE("servo_control_cotovelo", "Angulo %d fora do intervalo permitido (0-135)", angulo);
+    return ESP_ERR_INVALID_ARG;
+  }
+  servoDefinirAngulo(s, angulo);
+
+  return ESP_OK;
+}
+
+esp_err_t servo_control_garra(Servo *s, int angulo) {
+
+  if(angulo < 0 || angulo > 135) {
+    ESP_LOGE("servo_control_garra", "Angulo %d fora do intervalo permitido (0-135)", angulo);
+    return ESP_ERR_INVALID_ARG;
+  }
+  servoDefinirAngulo(s, angulo);
+
   return ESP_OK;
 }
 

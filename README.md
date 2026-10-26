@@ -1,107 +1,124 @@
-# Controle dos bracos e esteira com FreeRTOS
+# Edge IA ? controle de bracos e esteira
 
-Projeto ESP-IDF v5.4.4 em C para ESP32 (migrado do sketch Arduino com o mesmo
-comportamento). Usa o FreeRTOS do proprio ESP-IDF.
+Firmware em C para ESP32 com ESP-IDF 5.4.4 e FreeRTOS.
+A entrada da aplicacao e `app_main()`. Servos usam PWM LEDC de 50 Hz;
+Wi-Fi usa `esp_wifi` e MQTT usa `esp-mqtt`, a unica entrada de comandos.
 
 ## Compilar e gravar
 
-No terminal do ESP-IDF (ou pela extensao ESP-IDF do VS Code):
+Abra um terminal com o ambiente ESP-IDF exportado, ou use a extensao
+ESP-IDF do VS Code. O alvo configurado e `esp32` e a porta atual e `COM5`.
 
-    idf.py set-target esp32   # somente na primeira vez
-    idf.py build
-    idf.py -p COM5 flash monitor
+```powershell
+idf.py build
+idf.py -p COM5 flash monitor
+```
 
-No monitor, digite i ou p. Ctrl+] sai do monitor.
+Se a pasta `build` tiver cache de outro gerador CMake, use uma pasta nova,
+sem precisar apagar o build anterior:
 
-| Arduino | ESP-IDF |
+```powershell
+idf.py -B build/idf build
+idf.py -B build/idf -p COM5 flash monitor
+```
+
+A validacao desta reorganizacao usa `idf.py -B build/json-check build`.
+Use `Ctrl+]` para sair do monitor. O console opera a 115200 baud.
+`sdkconfig.defaults` define tick FreeRTOS de 1 ms, flash de 4 MB, particao
+de aplicacao de 1500 KB e logs de componentes a partir de WARN.
+
+## Estrutura
+
+| Arquivo ou pasta | Responsabilidade |
 | --- | --- |
-| ESP32Servo | main/servo.c (LEDC, 50 Hz, 1000 a 2000 us) |
-| Serial | driver UART0 a 115200 baud + printf/puts |
-| WiFi.h + PubSubClient | esp_wifi + esp-mqtt (main/mqtt.c) |
-| setup()/loop() | app_main() em main/main.c |
-| millis() | esp_timer_get_time() / 1000 |
+| `main/main.c` | Inicializacao, tarefas, poses, sequencia e controle dos atuadores |
+| `main/app_config.h` | Pulsos PWM, tempos, polaridade do rele e bits de comando |
+| `main/servo.c` e `servo.h` | Driver de servo posicional com LEDC |
+| `main/comando_json.c` e `.h` | Parser e validacao dos comandos JSON |
+| `main/mqtt.c` e `.h` | Wi-Fi, cliente MQTT e filas de comunicacao |
+| `components/ultrasonic/` | Componente nativo de medicao de distancia |
+| `docs/` | Protocolo, comportamento da esteira e datasheet |
 
-sdkconfig.defaults fixa tick de 1000 Hz (igual ao Arduino), particao de
-aplicacao de 1,5 MB e log do IDF em nivel WARN.
+Cada cabecalho declara seus includes necessarios. O driver do sensor e
+registrado automaticamente a partir de `components/`, sem depender de
+cabecalhos da aplicacao. Os arquivos de terceiros conservam os avisos de
+licenca existentes.
 
-## Organizacao
+## Tarefas e sincronizacao
 
-- taskControle: prioridade 2, stack de 4096 bytes, periodo solicitado de 10 ms
-  usando vTaskDelayUntil. Processa comandos, atualiza a rampa suave e avanca
-  a sequencia. E a unica tarefa que acessa os atuadores e o estado do ciclo.
-- taskSerial: prioridade 1, stack de 4096 bytes. Recebe i/p a 115200 baud,
-  envia notificacoes de bits ao controle e imprime mensagens de uma fila.
-- Fila de 24 mensagens: transporta ponteiros para textos estaticos. O envio
-  nao bloqueia o controle; mensagens sao descartadas se a fila estiver cheia.
-- app_main valida a montagem, inicializa os servos e cria os recursos RTOS.
-  Falha de alocacao mantem a esteira desligada e nao aceita ciclos.
-- app_main retorna ao fim da inicializacao. As tarefas sao criadas sem fixar
-  um nucleo.
+- `taskControle`: prioridade 2, periodo de 10 ms. Processa comandos,
+  interpola os angulos, avanca a sequencia e controla o rele. Depois da
+  inicializacao, somente essa tarefa altera os atuadores.
+- `taskLog`: prioridade 1. Imprime a fila de mensagens no monitor serial
+  sem bloquear o controle.
+- `task_esteira_with_ultrasonic`: prioridade 1. Mede em centimetros, espera
+  100 ms entre medicoes e envia a leitura mais recente por uma fila.
+- A tarefa interna do cliente MQTT recebe os comandos. Uma tarefa de
+  publicacao separada esvazia a fila de status.
 
-Se iniciar e parar estiverem pendentes na mesma leitura, parar prevalece.
-Comandos iguais pendentes sao agrupados, sem enfileirar ciclos futuros.
-O periodo e quantizado pelo tick do FreeRTOS e pode sofrer atraso de
-escalonamento; nao foi medida uma garantia de prazo no hardware.
-As rampas e tempos da sequencia continuam baseados em millis().
+Comandos de iniciar/parar usam notificacoes FreeRTOS; parar prevalece se
+ambos estiverem pendentes. Movimentos manuais usam fila de comandos por
+valor. Mensagens de status usam ponteiros para textos estaticos e podem
+ser descartadas se as filas estiverem cheias.
 
-## Configuracao preservada da versao funcional
+Tempos e rampas usam `esp_timer_get_time()`, convertido para milissegundos.
+Os periodos das tarefas sao sujeitos ao escalonamento; o driver do sensor
+usa uma regiao critica durante a captura do eco.
 
-Somente o primeiro braco esta ativo (BRACOS_ATIVOS = 1).
+## Montagem e calibracao
+
+Somente o primeiro braco esta ativo (`BRACOS_ATIVOS = 1`).
 
 | Eixo | GPIO | Angulo inicial |
 | --- | --- | --- |
 | Base | 13 | 90 |
-| Ombro | 14 | 90 |
+| Ombro | 14 | 60 |
 | Cotovelo | 27 | 90 |
-| Garra | 26 | 135 |
+| Garra | 26 | 60 |
 
-Rele no GPIO 25, ativo em LOW. Velocidade comandada: 70 graus/s.
-Garra 1 aberta: 30 graus; fechada: 120 graus. Os limites individuais estao
-em cfg; cfgSegundoBraco aguarda pinos exclusivos antes de ativar dois bracos.
-As poses, tabela de etapas e calculo da rampa foram mantidos no refactor.
+Rele: GPIO 25, ativo em nivel baixo. Sensor: trigger GPIO 5 e echo GPIO 18.
+Os pulsos efetivamente usados na conexao dos servos sao `SERVO_MIN_US` e
+`SERVO_MAX_US` em `main/app_config.h`. As constantes por eixo tambem estao
+nesse arquivo, mas ainda nao sao usadas pela chamada de conexao.
+Calibre os pulsos e as poses conforme a montagem antes de executar ciclos.
+A posicao fisica inicial nao e medida por este firmware.
 
 ## Operacao
 
-No monitor serial em 115200 baud, i inicia um ciclo e p cancela a sequencia,
-desliga a esteira e interrompe a rampa no ultimo angulo enviado. Isso nao
-mede nem interrompe instantaneamente o movimento mecanico do servo.
-Reposicione os bracos e o cubo antes de reiniciar um ciclo cancelado.
+`i` ou `iniciar` pelo MQTT inicia um ciclo; `p` ou `parar` cancela o ciclo,
+interrompe a rampa e desliga a esteira. O monitor serial apenas exibe logs.
+Reposicione a montagem antes de reiniciar um ciclo cancelado.
 
-O braco 1 pega, levanta, entrega e retorna; a esteira transporta por tempo;
-o braco 2 executa a retirada quando configurado e ativado. MOVIMENTO_MS e
-GARRA_MS sao pausas de acomodacao apos os movimentos. Sem sensores, nao ha
-confirmacao de pega ou chegada. Na energizacao pode haver deslocamento
-rapido ate a posicao inicial, pois a posicao real nao e lida.
+Os comandos JSON permitem movimentos individuais e poses:
+[protocolo e exemplos](docs/comandos-json.md).
+`MOVIMENTO_MS` e `GARRA_MS` sao pausas apos o movimento; a velocidade da
+rampa e configurada por `VELOCIDADE_GRAUS_S`.
 
-Use fonte externa adequada aos servos, com GND comum a ESP32. Nao alimente
-motores pelo 3V3. Use modulo rele compativel com logica de 3,3 V, contatos
-adequados a corrente de partida e supressao de transientes do motor DC.
+A esteira opera apenas na etapa prevista e com leitura valida do sensor.
+Para ao detectar menos de 12 cm ou ao atingir `ESTEIRA_MS`, atualmente
+12000 ms. Falha de leitura ou leitura vencida durante o funcionamento
+cancela o ciclo. Consulte [o controle do sensor](docs/esteira-ultrassonico.md).
 
-## MQTT
+## Rede e MQTT
 
-main/mqtt.c conecta ao Wi-Fi (esp_wifi, reconexao automatica) e ao broker
-test.mosquitto.org:1883 com o cliente esp-mqtt do IDF. A tarefa interna do
-esp-mqtt roda com prioridade 1 e reconecta a cada 5 s; keepalive de 15 s.
-Uma tarefa MQTT propria (prioridade 1) publica a fila de status.
+SSID, senha, URI do broker e opcao de IP estatico ficam em `main/mqtt.c`.
+O broker configurado atualmente e `mqtt://192.168.1.179:1883`.
+O cliente usa DHCP, reconexao MQTT a cada 5 segundos e keepalive de 15 s.
 
 | Topico | Direcao | Conteudo |
 | --- | --- | --- |
-| edge_ia/comando | recebe | i ou iniciar; p ou parar |
-| edge_ia/status | publica | as mesmas mensagens do Monitor Serial |
-| edge_ia/estado | publica (retido) | online; offline via Last Will |
+| `edge_ia/comando` | Recebe | JSON ou comandos de iniciar/parar, sem retain |
+| `edge_ia/status` | Publica | Mensagens do controle |
+| `edge_ia/estado` | Publica, retido | `online` e Last Will `offline` |
 
-Teste: `mosquitto_sub -h test.mosquitto.org -t "edge_ia/#" -v` e
-`mosquitto_pub -h test.mosquitto.org -t edge_ia/comando -m i`.
-O broker e publico: qualquer pessoa pode enviar comandos nesses topicos.
-Credenciais Wi-Fi e IP estatico opcional ficam no inicio de main/mqtt.c.
+```powershell
+mosquitto_sub -h 192.168.1.179 -t "edge_ia/#" -v
+```
 
-## Verificacao
+O broker precisa aceitar as credenciais utilizadas pelo cliente e estar
+acessivel da ESP32 na porta TCP 1883.
 
-Configuracao, poses, sequencia e calculo da rampa foram mantidos da versao
-Arduino. Compila com ESP-IDF v5.4.4 sem avisos; a versao IDF ainda nao foi
-testada em hardware.
+## Validacao
 
-Referencias:
-- https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32/api-reference/peripherals/ledc.html
-- https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32/api-reference/protocols/mqtt.html
-- https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32/api-reference/system/freertos.html
+A compilacao verifica o firmware e gera o binario. O funcionamento fisico
+dos servos, sensor e rele deve ser conferido na bancada apos gravar.

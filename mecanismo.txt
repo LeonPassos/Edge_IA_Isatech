@@ -1,0 +1,21 @@
+mecanismo
+
+garra{
+ min 30
+ max 110 
+}
+
+ombro{
+ min 50
+ max 140
+}
+
+cotovelo{
+ min 40
+ max 140
+} ta com problema
+
+base{
+ min 0
+ max 180
+}
