@@ -3,45 +3,30 @@
 
 #include <stdbool.h>
 #include <esp_err.h>
+#include "wifi/wifi.h"
 
-// Callbacks rodam na tarefa interna do esp-mqtt: devem ser curtos e nao
-// podem chamar mqtt_stop().
+#define MQTT_BROKER_URI     "mqtt://192.168.1.68:1883"
+#define MQTT_KEEPALIVE_S    15
+#define MQTT_RECONEXAO_MS   5000
+#define MQTT_PRIORIDADE     1     // Abaixo do controle (2): rede nao atrasa os servos.
+
+// Last Will: o broker publica "offline" (retido) se a ESP sumir.
+#define MQTT_TOPICO_ESTADO  "isatech/status"
+
+// Callbacks rodam na tarefa interna do esp-mqtt: devem ser curtos.
 typedef void (*mqtt_on_conexao_t)(bool conectado, void *ctx);
 // topico e dados NAO terminam em '\0'; use os tamanhos.
-typedef void (*mqtt_on_mensagem_t)(const char *topico, int topico_len,
-                                   const char *dados, int dados_len, void *ctx);
+typedef void (*mqtt_on_mensagem_t)(const char *topico, int topico_len, const char *dados, int dados_len, void *ctx);
 
-typedef struct {
-    const char *uri;          // Ex.: "mqtt://192.168.1.179:1883"
-    const char *client_id;    // NULL: gera "esp32-<MAC>"
-    int keepalive_s;          // 0: padrao do esp-mqtt (120 s)
-    int reconexao_ms;         // 0: padrao do esp-mqtt (10 s)
-    int prioridade_tarefa;    // 0: padrao do esp-mqtt (5)
+// Configura o cliente e passa a acompanhar o Wi-Fi: conecta ao broker quando
+// recebe IP e para quando o Wi-Fi cai. Chamar depois de wifi_init_sta().
+esp_err_t mqtt_init(void);
 
-    // Last Will opcional (lwt_topico NULL desativa).
-    const char *lwt_topico;
-    const char *lwt_mensagem;
-    int lwt_qos;
-    bool lwt_retain;
+// Opcional. Pode ser chamado antes ou depois de mqtt_init(). Assine os
+// topicos em on_conexao(true): a cada reconexao as assinaturas sao refeitas.
+void mqtt_callbacks(mqtt_on_conexao_t on_conexao, mqtt_on_mensagem_t on_mensagem, void *ctx);
 
-    mqtt_on_conexao_t on_conexao;   // Opcional
-    mqtt_on_mensagem_t on_mensagem; // Opcional
-    void *ctx;                      // Repassado aos callbacks
-} mqtt_config_t;
-
-// Cria o cliente sem conectar. Chamar uma vez. A uri deve continuar valida
-// (use um literal); as demais strings sao copiadas.
-esp_err_t mqtt_init(const mqtt_config_t *config);
-
-// Conecta ao broker; reconecta sozinho ate mqtt_stop(). Exige rede com IP.
-// Chamadas repetidas sao ignoradas.
-esp_err_t mqtt_start(void);
-
-// Desconecta e para a tarefa do cliente. Pode bloquear ate o fim da
-// operacao de rede em curso. Chamadas repetidas sao ignoradas.
-esp_err_t mqtt_stop(void);
-
-bool mqtt_conectado(void);
+bool if_mqtt_conectado(void);
 
 // Retornam ESP_ERR_INVALID_STATE se nao conectado. Podem bloquear enquanto
 // o esp-mqtt usa o socket; nao chamar de tarefas com tempo critico.

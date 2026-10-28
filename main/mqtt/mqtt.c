@@ -3,16 +3,22 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <esp_event.h>
 #include <esp_log.h>
 #include <esp_mac.h>
+#include <esp_netif.h>
+#include <esp_wifi.h>
 #include <mqtt_client.h>
 
 static const char *TAG = "mqtt";
 
 static esp_mqtt_client_handle_t s_client = NULL;
-static mqtt_config_t s_config;
 static atomic_bool s_iniciado = false;
 static atomic_bool s_conectado = false;
+
+static mqtt_on_conexao_t s_on_conexao = NULL;
+static mqtt_on_mensagem_t s_on_mensagem = NULL;
+static void *s_ctx = NULL;
 
 static void log_erro(const esp_mqtt_error_codes_t *e)
 {
@@ -32,7 +38,7 @@ static void log_erro(const esp_mqtt_error_codes_t *e)
 static void avisar_conexao(bool conectado)
 {
     s_conectado = conectado;
-    if (s_config.on_conexao) s_config.on_conexao(conectado, s_config.ctx);
+    if (s_on_conexao) s_on_conexao(conectado, s_ctx);
 }
 
 // Executado na tarefa interna do esp-mqtt.
@@ -43,11 +49,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
     const esp_mqtt_event_handle_t ev = event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "Conectado a %s.", s_config.uri);
+        ESP_LOGI(TAG, "Conectado a %s.", MQTT_BROKER_URI);
+        esp_mqtt_client_publish(s_client, MQTT_TOPICO_ESTADO, "online", 0, 1, 1);
         avisar_conexao(true);
         break;
     case MQTT_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "Desconectado do broker.");
+        ESP_LOGW(TAG, "Desconectado do broker; nova tentativa em %d ms.", MQTT_RECONEXAO_MS);
         avisar_conexao(false);
         break;
     case MQTT_EVENT_DATA:
@@ -58,9 +65,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             }
             break;
         }
-        if (s_config.on_mensagem) {
-            s_config.on_mensagem(ev->topic, ev->topic_len, ev->data, ev->data_len, s_config.ctx);
-        }
+        if (s_on_mensagem) s_on_mensagem(ev->topic, ev->topic_len, ev->data, ev->data_len, s_ctx);
         break;
     case MQTT_EVENT_ERROR:
         log_erro(ev->error_handle);
@@ -70,68 +75,95 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
     }
 }
 
-esp_err_t mqtt_init(const mqtt_config_t *config)
+// O exchange evita start/stop repetidos: STA_DISCONNECTED chega a cada
+// tentativa de reconexao do Wi-Fi.
+static void mqtt_start(void)
 {
-    if (config == NULL || config->uri == NULL) return ESP_ERR_INVALID_ARG;
-    if (s_client != NULL) return ESP_ERR_INVALID_STATE;
-    s_config = *config;
-
-    // O esp-mqtt copia as strings da configuracao; o buffer local basta.
-    char id[24];
-    const char *client_id = config->client_id;
-    if (client_id == NULL) {
-        uint8_t mac[6] = {0};
-        esp_efuse_mac_get_default(mac);
-        snprintf(id, sizeof(id), "esp32-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        client_id = id;
+    if (atomic_exchange(&s_iniciado, true)) return;
+    ESP_LOGI(TAG, "Wi-Fi com IP; conectando a %s...", MQTT_BROKER_URI);
+    if (esp_mqtt_client_start(s_client) != ESP_OK) {
+        s_iniciado = false;
+        ESP_LOGE(TAG, "Falha ao iniciar o cliente.");
     }
-
-    esp_mqtt_client_config_t cfg = {
-        .broker.address.uri = config->uri,
-        .credentials.client_id = client_id,
-        .session.keepalive = config->keepalive_s,
-        .network.reconnect_timeout_ms = config->reconexao_ms,
-        .task.priority = config->prioridade_tarefa,
-    };
-    if (config->lwt_topico != NULL) {
-        cfg.session.last_will.topic = config->lwt_topico;
-        cfg.session.last_will.msg = config->lwt_mensagem;
-        cfg.session.last_will.qos = config->lwt_qos;
-        cfg.session.last_will.retain = config->lwt_retain;
-    }
-
-    s_client = esp_mqtt_client_init(&cfg);
-    if (s_client == NULL) return ESP_FAIL;
-    const esp_err_t err = esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, NULL);
-    if (err != ESP_OK) {
-        esp_mqtt_client_destroy(s_client);
-        s_client = NULL;
-    }
-    return err;
 }
 
-esp_err_t mqtt_start(void)
+static void mqtt_stop(void)
 {
-    if (s_client == NULL) return ESP_ERR_INVALID_STATE;
-    if (atomic_exchange(&s_iniciado, true)) return ESP_OK;
-    ESP_LOGI(TAG, "Conectando a %s...", s_config.uri);
-    const esp_err_t err = esp_mqtt_client_start(s_client);
-    if (err != ESP_OK) s_iniciado = false;
-    return err;
-}
-
-esp_err_t mqtt_stop(void)
-{
-    if (s_client == NULL) return ESP_ERR_INVALID_STATE;
-    if (!atomic_exchange(&s_iniciado, false)) return ESP_OK;
-    const esp_err_t err = esp_mqtt_client_stop(s_client);
+    if (!atomic_exchange(&s_iniciado, false)) return;
+    esp_mqtt_client_stop(s_client);
     // stop nao gera MQTT_EVENT_DISCONNECTED.
     if (s_conectado) avisar_conexao(false);
-    ESP_LOGI(TAG, "Cliente parado.");
-    return err;
+    ESP_LOGW(TAG, "Wi-Fi caiu; cliente parado ate o proximo IP.");
 }
 
-bool mqtt_conectado(void)
+// Executado no loop de eventos padrao, junto com o handler do wifi.c.
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)data;
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        mqtt_start();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        mqtt_stop();
+    }
+}
+
+
+esp_err_t mqtt_init(void)
+{
+    if (s_client != NULL) return ESP_ERR_INVALID_STATE;
+
+    // O esp-mqtt copia as strings da configuracao; o buffer local basta.
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    char id[24];
+    snprintf(id, sizeof(id), "esp32-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    const esp_mqtt_client_config_t cfg = {
+        .broker.address.uri = MQTT_BROKER_URI,
+        .credentials.client_id = id,
+        .session.keepalive = MQTT_KEEPALIVE_S,
+        .session.last_will = {
+            .topic = MQTT_TOPICO_ESTADO,
+            .msg = "offline",
+            .qos = 1,
+            .retain = 1,
+        },
+        .network.reconnect_timeout_ms = MQTT_RECONEXAO_MS,
+        .task.priority = MQTT_PRIORIDADE,
+    };
+
+    s_client = esp_mqtt_client_init(&cfg);
+    if (s_client == NULL) {
+      return ESP_FAIL;
+    }
+
+    esp_err_t err = esp_mqtt_client_register_event(s_client, MQTT_EVENT_ANY, mqtt_event_handler, NULL);
+    if (err == ESP_OK) err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+    if (err == ESP_OK) err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao registrar eventos (%s). wifi_init_sta() foi chamado antes?", esp_err_to_name(err));
+        return err;
+    }
+
+    // O IP pode ter chegado antes do registro dos handlers.
+    if (wifi_got_ip()) {
+        mqtt_start();
+    } else {
+        ESP_LOGI(TAG, "Aguardando IP do Wi-Fi para conectar a %s.", MQTT_BROKER_URI);
+    }
+    
+    return ESP_OK;
+}
+
+void mqtt_callbacks(mqtt_on_conexao_t on_conexao, mqtt_on_mensagem_t on_mensagem, void *ctx)
+{
+    s_ctx = ctx;
+    s_on_conexao = on_conexao;
+    s_on_mensagem = on_mensagem;
+}
+
+bool if_mqtt_conectado(void)
 {
     return s_conectado;
 }

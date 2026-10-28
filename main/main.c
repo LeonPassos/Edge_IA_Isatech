@@ -1,20 +1,6 @@
-﻿#include <assert.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <driver/gpio.h>
-#include <esp_timer.h>
-#include "servo/servo.h"
-#include "app_config.h"
-#include "ultrasonic/ultrasonic.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
-#include <esp_log.h>
-#include "mqtt/mqtt.h"
-#include "comando_json.h"
-#include "wifi/wifi.h"
+﻿
 #include "main.h"
+
 
 static const char *TAG = "main";
 
@@ -29,41 +15,33 @@ typedef struct {
 
 static const ServoCfg cfg[4] = {
   {"Base",     13, 0, 180, 90},
-  {"Ombro",    14, 0, 180, 60},
-  {"Cotovelo", 27, 0, 180, 90},
-  {"Garra",    26, 0, 180, 60}
+  {"Ombro",    14, 0, 180, 120},
+  {"Cotovelo", 27, 0, 180, 30},
+  {"Garra",    26, 0, 180, 90}
 };
 static const ServoCfg cfgSegundoBraco[4] = {
-  {"Base",     -1, 0, 180, 90},
-  {"Ombro",    -1, 0, 180, 90},
-  {"Cotovelo", -1, 0, 180, 90},
-  {"Garra",    -1, 0, 180, 90}
+  {"Base",     16, 0, 180, 90},
+  {"Ombro",    17, 0, 180, 90},
+  {"Cotovelo", 21, 0, 180, 90},
+  {"Garra",    22, 0, 180, 90}
 };
 static const ServoCfg *const CONFIG_BRACOS[2] = {cfg, cfgSegundoBraco};
-#define BRACOS_ATIVOS 1 // Teste atual: somente o primeiro braco.
+#define BRACOS_ATIVOS 2 // Teste atual: somente o primeiro braco.
 static_assert(BRACOS_ATIVOS >= 1 && BRACOS_ATIVOS <= 2, "Use um ou dois bracos");
 static_assert(BRACOS_ATIVOS * 4 <= LEDC_CHANNEL_MAX, "Canais LEDC insuficientes");
 
 // EXEMPLOS: calibrar todos os angulos para a geometria real, sem carga.
-// Coordenadas em graus. Servo posicional; nao usar servo de rotacao continua.
-typedef struct {
-  int base;
-  int ombro;
-  int cotovelo;
-  int garra;
-} Pose;
-
 // Neste exemplo, abrir reduz o angulo. Calibrar em passos de 5 graus.
-#define ABERTA_1 30
-#define FECHADA_1 120
+#define ABERTA_1 20
+#define FECHADA_1 90
 #define ABERTA_2 70
 #define FECHADA_2 110
 // Base, ombro e cotovelo de cada posicao; a garra vem em cada etapa.
-#define REPOUSO          90,  90, 90
-#define ACIMA_ENTRADA    30,  90, 90
-#define PEGA_ENTRADA     30, 120, 60
-#define ACIMA_ESTEIRA_1 150,  90, 90
-#define ENTREGA_ESTEIRA 150, 120, 60
+#define REPOUSO          90,  130, 30
+#define ACIMA_ENTRADA    10,  120, 30
+#define PEGA_ENTRADA     10, 70, 30
+#define ACIMA_ESTEIRA_1  90, 130, 30
+#define ENTREGA_ESTEIRA  90, 110, 30
 #define ACIMA_ESTEIRA_2  30,  90, 90
 #define PEGA_ESTEIRA     30, 120, 60
 #define ACIMA_SAIDA     150,  90, 90
@@ -106,10 +84,9 @@ static TickType_t ticks(uint32_t ms) {
 }
 
 // Apenas literais estaticos sao enviados: os ponteiros continuam validos.
-// Log nunca bloqueia o controle; fila cheia descarta a mensagem.
+// Nunca bloqueia o controle: taskLog imprime e publica; fila cheia descarta.
 static void registrar(const char *mensagem) {
   if (filaMensagens != NULL) xQueueSend(filaMensagens, &mensagem, 0);
-  // publicarMqtt(mensagem);
 }
 
 static Servo servos[2][4];
@@ -123,24 +100,10 @@ static bool emMovimento = false;
 static uint8_t bracoMovendo = 0;
 static uint32_t inicioMovimento = 0, duracaoMovimento = 0, ultimaAtualizacao = 0;
 
-typedef enum {
-    MOVER,
-    GARRA,
-    LIGAR_ESTEIRA,
-    DESLIGAR_ESTEIRA
-} Acao;
-
-typedef struct {
-  Acao acao;
-  uint8_t braco;
-  Pose pose;
-  uint32_t tempo;
-  const char *mensagem;
-} Etapa;
 
 // O braco que nao recebe comando mantem sua ultima posicao.
 static const Etapa SEQUENCIA[] = {
-  {MOVER, 0, {REPOUSO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: repouso."},
+  // {MOVER, 0, {REPOUSO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: repouso."},
   {MOVER, 1, {REPOUSO, ABERTA_2}, MOVIMENTO_MS, "Braco 2: repouso."},
   {MOVER, 0, {ACIMA_ENTRADA, ABERTA_1}, MOVIMENTO_MS, "Braco 1: acima do cubo."},
   {MOVER, 0, {PEGA_ENTRADA, ABERTA_1}, MOVIMENTO_MS, "Braco 1: descer para pegar."},
@@ -179,12 +142,12 @@ static bool sensorValido(void) {
   return leituraRecebida && ultimaLeitura.erro == ESP_OK && (uint32_t)(tempoAtualMs() - ultimaLeitura.instante_ms) <= VALIDADE_SENSOR_MS;
 }
 
-static bool controleOcupado(void) {
+static bool busy_control(void) {
   return executando || emMovimento;
 }
 
 // Para esteira, ciclo e movimento, e descarta comandos JSON pendentes.
-static void cancelar(const char *motivo) {
+static void cancel_op(const char *motivo) {
   pararEsteira();
   executando = false;
   emMovimento = false;
@@ -192,8 +155,8 @@ static void cancelar(const char *motivo) {
   registrar(motivo);
 }
 
-static void cancelarPorSensor(void) {
-  cancelar("Ciclo cancelado: sensor sem leitura valida. Confira o sensor e envie iniciar.");
+static void cancel_opPorSensor(void) {
+  cancel_op("Ciclo cancelado: sensor sem leitura valida. Confira o sensor e envie iniciar.");
 }
 
 static void atualizarSensor(void) {
@@ -204,7 +167,8 @@ static void atualizarSensor(void) {
   }
   if (!esteiraLigada) return;
   if (!sensorValido()) {
-    cancelarPorSensor();
+    // cancel_opPorSensor();
+    ESP_LOGI(TAG, "Medição do sensor: %d", ultimaLeitura.erro);
   } else if (ultimaLeitura.distancia_cm < LIMITE_DISTANCIA) {
     pararEsteira();
     // Antecipar a etapa DESLIGAR_ESTEIRA, que conta o tempo de acomodacao.
@@ -248,7 +212,7 @@ static void atualizarMovimento(void) {
   for (uint8_t eixo = 0; eixo < 4; ++eixo) {
     const int angulo = (int)lroundf(origem[eixo] + (destino[eixo] - origem[eixo]) * suave);
     posicao[bracoMovendo][eixo] = angulo;
-    servoDefinirAngulo(&servos[bracoMovendo][eixo], angulo);
+    servo_Set_Angle(&servos[bracoMovendo][eixo], angulo);
   }
   if (decorrido >= duracaoMovimento) {
     emMovimento = false;
@@ -259,12 +223,12 @@ static void atualizarMovimento(void) {
 static void atualizar(void) {
   if (!executando || emMovimento || (uint32_t)(tempoAtualMs() - inicio) < espera) return;
   while (proximaEtapa < TOTAL_ETAPAS && (SEQUENCIA[proximaEtapa].acao == MOVER || SEQUENCIA[proximaEtapa].acao == GARRA) && SEQUENCIA[proximaEtapa].braco >= BRACOS_ATIVOS) ++proximaEtapa;
-  // if (proximaEtapa >= TOTAL_ETAPAS) {
-  //   pararEsteira();
-  //   executando = false;
-  //   registrar("Ciclo concluido. Envie i para repetir.");
-  //   return;
-  // }
+  if (proximaEtapa >= TOTAL_ETAPAS) {
+    pararEsteira();
+    executando = false;
+    registrar("Ciclo concluido. Envie i para repetir.");
+    return;
+  }
   const Etapa *e = &SEQUENCIA[proximaEtapa++];
   switch (e->acao) {
     case MOVER: mover(e->braco, &e->pose); break;
@@ -273,7 +237,7 @@ static void atualizar(void) {
       break;
     case LIGAR_ESTEIRA:
       if (!sensorValido()) {
-        cancelarPorSensor();
+        cancel_opPorSensor();
         return;
       }
       if (ultimaLeitura.distancia_cm < LIMITE_DISTANCIA) {
@@ -292,21 +256,8 @@ static void atualizar(void) {
   espera = e->tempo;
 }
 
+// O sensor e iniciado pela propria tarefa de medicao.
 esp_err_t config_pins(void){
-
-  esp_err_t err;
-
-  ultrasonic_sensor_t sensor = { 
-      .trigger_pin = TRIGGER_GPIO,
-      .echo_pin = ECHO_GPIO
-  };
-
-  if(ultrasonic_init(&sensor) != ESP_OK) {
-    ESP_LOGE(TAG, "Falha ao iniciar sensor ultrassonico.");
-  }
-
-
-
 
   // Nivel definido antes de habilitar a saida: o rele nao pulsa no boot.
   gpio_set_level(PIN_RELE, RELE_DESLIGADO);
@@ -330,7 +281,7 @@ static void executarComandoJson(const ComandoJson *comando) {
     return;
   }
 
-  if (controleOcupado()) {
+  if (busy_control()) {
     registrar("Controle ocupado. Aguarde terminar ou envie parar.");
     return;
   }
@@ -364,7 +315,7 @@ static void executarComandoJson(const ComandoJson *comando) {
 }
 
 static void iniciarCiclo(void) {
-  if (controleOcupado()) {
+  if (busy_control()) {
     registrar("Controle ocupado. Aguarde terminar ou envie parar.");
     return;
   }
@@ -383,21 +334,24 @@ static void processarComandosJson(void) {
   }
 }
 
-static void taskControle(void *parameter) {
-  (void)parameter;
-  TickType_t ultimaExecucao = xTaskGetTickCount();
-  const TickType_t periodo = ticks(PERIODO_CONTROLE_MS);
+// Ocioso: dorme ate chegar um comando. Com movimento, ciclo ou esteira em
+// andamento, acorda a cada periodo para animar servos e seguir as etapas.
+static TickType_t wait_time(void) {
+  return busy_control() || esteiraLigada ? ticks(PERIODO_CONTROLE_MS) : portMAX_DELAY;
+}
 
-  for (;;) {
+static void taskControle() {
+
+  while(1) {
     uint32_t comandos = 0;
-    xTaskNotifyWait(0, UINT32_MAX, &comandos, 0);
+    xTaskNotifyWait(0, UINT32_MAX, &comandos, wait_time());
 
     // Se i e p chegarem no mesmo periodo, p prevalece.
     if (comandos & CMD_PARAR) {
-      cancelar("Cancelado. Reposicione bracos e cubo antes de reiniciar.");
+      cancel_op("Cancelado. Reposicione bracos e cubo antes de reiniciar.");
     } else {
       if (comandos & CMD_INICIAR) iniciarCiclo();
-      processarComandosJson();
+      if (comandos & CMD_JSON) processarComandosJson();
     }
 
     atualizarSensor();
@@ -408,16 +362,59 @@ static void taskControle(void *parameter) {
     if (comandoAvulsoConcluido) registrar("Comando JSON: movimento concluido.");
 
     atualizar();
-    vTaskDelayUntil(&ultimaExecucao, periodo);
   }
 }
 
-// Impressao fica fora do controle para que a Serial nao atrase os servos.
+static bool ehComando(const char *texto, const char *curto, const char *longo) {
+  return strcasecmp(texto, curto) == 0 || strcasecmp(texto, longo) == 0;
+}
+
+// Executado na tarefa do esp-mqtt: so traduz a mensagem e entrega ao controle.
+static void aoReceberMqtt(const char *topico, int topico_len, const char *dados, int dados_len, void *ctx) {
+  (void)ctx;
+  if (topico_len != (int)strlen(TOPICO_COMANDO) || memcmp(topico, TOPICO_COMANDO, topico_len) != 0) return;
+  if (dados_len <= 0 || dados_len > COMANDO_JSON_MAX) {
+    registrar("Comando vazio ou maior que 256 bytes.");
+    return;
+  }
+  char texto[COMANDO_JSON_MAX + 1];
+  memcpy(texto, dados, dados_len);
+  texto[dados_len] = '\0';
+
+  if (ehComando(texto, "p", "parar")) {
+    xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
+  } else if (ehComando(texto, "i", "iniciar")) {
+    xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);
+  } else {
+    ComandoJson comando;
+    if (!comandoJsonParse(texto, dados_len, &comando)) {
+      registrar("JSON invalido. Consulte docs/comandos-json.md.");
+    } else if (comando.acao == JSON_PARAR) {
+      xTaskNotify(controleHandle, CMD_PARAR, eSetBits);
+    } else if (comando.acao == JSON_INICIAR) {
+      xTaskNotify(controleHandle, CMD_INICIAR, eSetBits);
+    } else if (xQueueSend(filaComandos, &comando, 0) != pdTRUE) {
+      registrar("Fila de comandos cheia. Tente novamente.");
+    } else {
+      xTaskNotify(controleHandle, CMD_JSON, eSetBits);
+    }
+  }
+}
+
+// A cada (re)conexao a assinatura precisa ser refeita.
+static void aoConectarMqtt(bool conectado, void *ctx) {
+  (void)ctx;
+  if (conectado) mqtt_subscribe(TOPICO_COMANDO, 0);
+}
+
+// Serial e rede ficam fora do controle: imprimir e publicar podem bloquear.
 static void taskLog(void *parameter) {
   (void)parameter;
   const char *mensagem = NULL;
   for (;;) {
-    if (xQueueReceive(filaMensagens, &mensagem, portMAX_DELAY) == pdTRUE) puts(mensagem);
+    if (xQueueReceive(filaMensagens, &mensagem, portMAX_DELAY) != pdTRUE) continue;
+    puts(mensagem);
+    if (if_mqtt_conectado()) mqtt_publish(TOPICO_LOG, mensagem, 0, false);
   }
 }
 
@@ -438,9 +435,22 @@ static void task_esteira_with_ultrasonic(void *parameter) {
     vTaskDelete(NULL);
     return;
   }
+  esp_err_t erroAnterior = ESP_OK;
   for (;;) {
     LeituraSensor leitura = {0};
     leitura.erro = ultrasonic_measure_cm(&sensor, MAX_DISTANCE_CM, &leitura.distancia_cm);
+    // Eco alem de MAX_DISTANCE_CM: nada na frente do sensor. E leitura valida.
+    if (leitura.erro == ESP_ERR_ULTRASONIC_ECHO_TIMEOUT) {
+      leitura.erro = ESP_OK;
+      leitura.distancia_cm = MAX_DISTANCE_CM;
+    }
+    // Loga so quando o estado muda, para nao inundar a Serial a cada 100 ms.
+    // if (leitura.erro != erroAnterior) {
+    //   if (leitura.erro == ESP_OK) ESP_LOGI("ultrasonic", "Leituras normalizadas.");
+    //   // 0x200: eco preso do ping anterior; 0x201: sem resposta (fiacao/alimentacao).
+    //   else ESP_LOGW("ultrasonic", "Falha na medicao: 0x%x", (unsigned)leitura.erro);
+    //   erroAnterior = leitura.erro;
+    // }
     leitura.instante_ms = tempoAtualMs();
     xQueueOverwrite(filaSensor, &leitura);
     vTaskDelay(ticks(PERIODO_SENSOR_MS));
@@ -452,40 +462,41 @@ void app_main(void) {
   // Primeiro: cria o loop de eventos usado pelo MQTT.
   wifi_init_sta();
 
-  // bool done = true;
-  
-  // config_pins();
+  bool done = true;
 
-  // // Validar antes de conectar qualquer servo.
-  // for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
-  //   for (uint8_t eixo = 0; eixo < 4; ++eixo) {
-  //     const ServoCfg *c = &CONFIG_BRACOS[b][eixo];
-  //     if (c->pino < 0 || !GPIO_IS_VALID_OUTPUT_GPIO(c->pino) || c->pino == PIN_RELE ||
-  //         c->minimo < 0 || c->maximo > 180 || c->minimo > c->maximo ||
-  //         c->inicial < c->minimo || c->inicial > c->maximo) done = false;
-  //     for (uint8_t anterior = 0; anterior < b * 4 + eixo; ++anterior) {
-  //       if (c->pino == CONFIG_BRACOS[anterior / 4][anterior % 4].pino) done = false;
-  //     }
-  //   }
-  // }
-  // if (!done) {
-  //   ESP_LOGE(TAG, "Configuracao invalida: confira pinos exclusivos, limites e posicoes iniciais.");
-  //   return;
-  // }
+  config_pins();
 
-  // for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
-  //   for (uint8_t eixo = 0; eixo < 4; ++eixo) {
-  //     const ServoCfg *c = &CONFIG_BRACOS[b][eixo];
-  //     if (!servoConectar(&servos[b][eixo], c->pino, (ledc_channel_t)(b * 4 + eixo), SERVO_MIN_US, SERVO_MAX_US)) done = false;
-  //     // Sem sensor, a primeira referencia e o angulo inicial configurado.
-  //     posicao[b][eixo] = c->inicial;
-  //     servoDefinirAngulo(&servos[b][eixo], c->inicial);
-  //   }
-  // }
-  // if (!done) {
-  //   ESP_LOGE(TAG, "Falha ao conectar servos; inicio bloqueado.");
-  //   return;
-  // }
+  // Validar antes de conectar qualquer servo.
+  for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
+    for (uint8_t eixo = 0; eixo < 4; ++eixo) {
+      const ServoCfg *c = &CONFIG_BRACOS[b][eixo];
+      if (c->pino < 0 || !GPIO_IS_VALID_OUTPUT_GPIO(c->pino) || c->pino == PIN_RELE ||
+          c->minimo < 0 || c->maximo > 180 || c->minimo > c->maximo ||
+          c->inicial < c->minimo || c->inicial > c->maximo) done = false;
+      for (uint8_t anterior = 0; anterior < b * 4 + eixo; ++anterior) {
+        if (c->pino == CONFIG_BRACOS[anterior / 4][anterior % 4].pino) done = false;
+      }
+    }
+  }
+  if (!done) {
+    ESP_LOGE(TAG, "Configuracao invalida: confira pinos exclusivos, limites e posicoes iniciais.");
+    return;
+  }
+
+  for (uint8_t b = 0; b < BRACOS_ATIVOS; ++b) {
+    for (uint8_t eixo = 0; eixo < 4; ++eixo) {
+      const ServoCfg *c = &CONFIG_BRACOS[b][eixo];
+      if (!servo_init(&servos[b][eixo], c->pino, (ledc_channel_t)(b * 4 + eixo), SERVO_MIN_US, SERVO_MAX_US)) done = false;
+      // Sem sensor, a primeira referencia e o angulo inicial configurado.
+      posicao[b][eixo] = c->inicial;
+      servo_Set_Angle(&servos[b][eixo], c->inicial);
+    }
+  }
+  if (!done) {
+    ESP_LOGE(TAG, "Falha ao conectar servos; inicio bloqueado.");
+    return;
+  }
+  ESP_LOGI(TAG, "Servos conectados nas posicoes iniciais.");
 
   filaMensagens = xQueueCreate(24, sizeof(const char *));
   filaComandos = xQueueCreate(8, sizeof(ComandoJson));
@@ -518,26 +529,17 @@ void app_main(void) {
     ESP_LOGE(TAG, "Falha ao criar tarefa de log; mensagens somente por MQTT.");
   }
 
+  // Sem produtor, sensorValido() impede ligar a esteira.
+  if (xTaskCreate(task_esteira_with_ultrasonic, "Sensor", 4096, NULL, 1, NULL) != pdPASS) {
+    ESP_LOGE(TAG, "Falha ao criar tarefa do sensor: etapa da esteira bloqueada.");
+  }
+
   // MQTT conecta quando o Wi-Fi recebe IP. E a unica entrada de comandos.
-
-  mqtt_init(&(mqtt_config_t){
-    .uri = MQTT_BROKER_URI,
-    .client_id = NULL, // Gera "esp32-<MAC>"
-    .keepalive_s = 120,
-    .reconexao_ms = 10000,
-    .prioridade_tarefa = 5,
-    .lwt_topico = "isatech/status",
-    .lwt_mensagem = "offline",
-    .lwt_qos = 0,
-    .lwt_retain = true,
-    .ctx = NULL
-  });
-
-  mqtt_start();
-  // if (xTaskCreate(task_esteira_with_ultrasonic, "EsteiraUltrasonic", 4096, NULL, 1, NULL) == pdPASS) {
-  //   ESP_LOGE(TAG, "Task criada com sucesso.");
-  // }
+  // Callbacks antes do init: o controle ja existe para receber os comandos.
+  mqtt_callbacks(aoConectarMqtt, aoReceberMqtt, NULL);
+  if (mqtt_init() != ESP_OK) {
+    ESP_LOGE(TAG, "Falha ao iniciar MQTT; nenhum comando sera recebido.");
+  }
 
 
-  // Ao retornar, a tarefa main do IDF e encerrada; o trabalho fica nas tarefas.
 }

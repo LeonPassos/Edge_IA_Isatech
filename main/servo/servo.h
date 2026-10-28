@@ -12,8 +12,8 @@ typedef struct {
   int minUs, maxUs;
 } Servo;
 
-bool servoConectar(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxUs);
-void servoDefinirAngulo(Servo *s, int angulo);
+bool servo_init(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxUs);
+void servo_Set_Angle(Servo *s, int angulo);
 esp_err_t servo_control_base(Servo *s, int angulo);
 esp_err_t servo_control_ombro(Servo *s, int angulo);
 esp_err_t servo_control_cotovelo(Servo *s, int angulo);

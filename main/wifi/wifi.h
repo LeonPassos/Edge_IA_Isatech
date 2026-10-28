@@ -10,6 +10,8 @@
 // Retorna antes de conectar; a reconexao e automatica.
 void wifi_init_sta(void);
 
+bool wifi_got_ip(void);
+
 // true depois de receber IP; volta a false ao desconectar.
 bool wifi_conectado(void);
 

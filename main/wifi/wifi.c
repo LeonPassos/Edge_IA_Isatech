@@ -38,6 +38,13 @@ bool wifi_conectado(void)
     return wifi_connected;
 }
 
+bool wifi_got_ip(void)
+{
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip = {0};
+    return sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0;
+}
+
 void wifi_init_sta(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -61,7 +68,6 @@ void wifi_init_sta(void)
         .sta = {
             .ssid = ESP_WIFI_SSID,
             .password = ESP_WIFI_PASS,
-            // Aceita WPA2 e WPA2/WPA3 misto; rede somente WPA3 nao conecta.
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };

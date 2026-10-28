@@ -9,7 +9,7 @@
 #define PERIODO_US    (1000000 / FREQUENCIA_HZ)
 
 // Todos os servos compartilham o mesmo timer de 50 Hz.
-static bool configurarTimer(void) {
+static bool timer_config(void) {
   static bool configurado = false;
   if (configurado) {
     return true;
@@ -25,15 +25,15 @@ static bool configurarTimer(void) {
   return configurado;
 }
 
-bool servoConectar(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxUs) {
-  if (!configurarTimer()) return false;
+bool servo_init(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxUs) {
+  if (!timer_config()) return false;
   ledc_channel_config_t c = {0};
   c.gpio_num = pino;
   c.speed_mode = MODO;
   c.channel = canal;
   c.intr_type = LEDC_INTR_DISABLE;
   c.timer_sel = TIMER;
-  c.duty = 0; // Sem pulso ate o primeiro servoDefinirAngulo.
+  c.duty = 0; // Sem pulso ate o primeiro servo_Set_Angle.
   if (ledc_channel_config(&c) != ESP_OK) return false;
   s->canal = canal;
   s->minUs = minUs;
@@ -42,7 +42,7 @@ bool servoConectar(Servo *s, int pino, ledc_channel_t canal, int minUs, int maxU
   return true;
 }
 
-void servoDefinirAngulo(Servo *s, int angulo) {
+void servo_Set_Angle(Servo *s, int angulo) {
   if (!s->conectado) return;
   if (angulo < 0) angulo = 0;
   if (angulo > 180) angulo = 180;
@@ -58,7 +58,7 @@ esp_err_t servo_control_base(Servo *s, int angulo) {
     ESP_LOGE("servo_control_base", "Angulo %d fora do intervalo permitido (0-135)", angulo);
     return ESP_ERR_INVALID_ARG;
   }
-  servoDefinirAngulo(s, angulo);
+  servo_Set_Angle(s, angulo);
 
   return ESP_OK;
 }
@@ -69,7 +69,7 @@ esp_err_t servo_control_ombro(Servo *s, int angulo) {
     ESP_LOGE("servo_control_ombro", "Angulo %d fora do intervalo permitido (0-135)", angulo);
     return ESP_ERR_INVALID_ARG;
   }
-  servoDefinirAngulo(s, angulo);
+  servo_Set_Angle(s, angulo);
 
   return ESP_OK;
 }
@@ -80,7 +80,7 @@ esp_err_t servo_control_cotovelo(Servo *s, int angulo) {
     ESP_LOGE("servo_control_cotovelo", "Angulo %d fora do intervalo permitido (0-135)", angulo);
     return ESP_ERR_INVALID_ARG;
   }
-  servoDefinirAngulo(s, angulo);
+  servo_Set_Angle(s, angulo);
 
   return ESP_OK;
 }
@@ -91,7 +91,7 @@ esp_err_t servo_control_garra(Servo *s, int angulo) {
     ESP_LOGE("servo_control_garra", "Angulo %d fora do intervalo permitido (0-135)", angulo);
     return ESP_ERR_INVALID_ARG;
   }
-  servoDefinirAngulo(s, angulo);
+  servo_Set_Angle(s, angulo);
 
   return ESP_OK;
 }
