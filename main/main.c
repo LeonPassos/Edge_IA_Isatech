@@ -1,17 +1,7 @@
 ﻿
 #include "main.h"
 
-
 static const char *TAG = "main";
-
-// ESP32 DevKit classica. Ordem: BASE, OMBRO, COTOVELO, GARRA.
-typedef struct {
-  const char *nome;
-  int pino;
-  int minimo;
-  int maximo;
-  int inicial;
-} ServoCfg;
 
 static const ServoCfg cfg[4] = {
   //o de vdd é o primeiro 
@@ -25,7 +15,7 @@ static const ServoCfg cfg[4] = {
   // {"Garra",    23, 0, 180, 90}
 };
 static const ServoCfg cfgSegundoBraco[4] = {
-
+  
   {"Base",     14, 0, 180, 90},
   {"Ombro",    27, 0, 180, 170},
   {"Cotovelo", 26, 0, 180, 50},
@@ -35,78 +25,39 @@ static const ServoCfg cfgSegundoBraco[4] = {
   // {"Cotovelo", 27, 0, 180, 30},
   // {"Garra",    26, 0, 180, 90}
 };
+
 static const ServoCfg *const CONFIG_BRACOS[2] = {cfg, cfgSegundoBraco};
 #define BRACOS_ATIVOS 2 // Teste atual: somente o primeiro braco.
 static_assert(BRACOS_ATIVOS >= 1 && BRACOS_ATIVOS <= 2, "Use um ou dois bracos");
 static_assert(BRACOS_ATIVOS * 4 <= LEDC_CHANNEL_MAX, "Canais LEDC insuficientes");
 
-// EXEMPLOS: calibrar todos os angulos para a geometria real, sem carga.
-// Neste exemplo, abrir reduz o angulo. Calibrar em passos de 5 graus.
-#define ABERTA_1 20
-#define FECHADA_1 90
-#define ABERTA_2 110
-#define FECHADA_2 90
-// Base, ombro e cotovelo de cada posicao; a garra vem em cada etapa.
-#define REPOUSO          90, 120, 90
-#define REPOUSO_2          90, 180, 50
-#define ACIMA_CUBO        0, 120, 90
-#define PEGA_CUBO         0, 70,  110
-#define ACIMA_ESTEIRA_1  90, 130, 115
-#define ENTREGA_ESTEIRA  90, 100, 115
 
-#define PARA_ESTEIRA_2      90, 180, 50
-#define PEGA_CUBO_ESTEIRA_2  90, 165, 100
-#define ACIMA_ESTEIRA_2          90, 180, 100
-#define ENTREGA_SAIDA       180, 150, 120
-
-// Depois do app_main, somente taskControle acessa atuadores e estado da sequencia.
-#define PERIODO_CONTROLE_MS 10
 static TaskHandle_t controleHandle = NULL;
 static QueueHandle_t filaMensagens = NULL;
 static QueueHandle_t filaComandos = NULL;
 static QueueHandle_t filaSensor = NULL;
-
-#define MAX_DISTANCE_CM 50
-#define LIMITE_DISTANCIA 11  
-#define TRIGGER_GPIO 5
-#define ECHO_GPIO 17
-#define PERIODO_SENSOR_MS 50
-#define VALIDADE_SENSOR_MS 50
-
-// Estado acessado apenas por taskControle; o sensor envia copias pela fila.
+static Servo servos[2][4];
 static LeituraSensor ultimaLeitura = {.erro = ESP_ERR_INVALID_STATE};
-static bool leituraRecebida = false;
-static bool esteiraLigada = false;
+static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
+static size_t proximaEtapa = 0;
+static uint8_t bracoMovendo = 0;
+static uint32_t inicioMovimento = 0, duracaoMovimento = 0, ultimaAtualizacao = 0, inicio = 0, espera = 0;
+static bool leituraRecebida = false, esteiraLigada = false, executando = false, emMovimento = false;;
 
-// Tempo monotonicamente crescente desde o boot, fornecido pelo esp_timer.
+
 static uint32_t tempoAtualMs(void) {
   return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-// Converte ms em ticks, com no minimo 1 tick.
 static TickType_t ticks(uint32_t ms) {
   const TickType_t t = pdMS_TO_TICKS(ms);
   return t > 0 ? t : 1;
 }
 
-// Apenas literais estaticos sao enviados: os ponteiros continuam validos.
-// Nunca bloqueia o controle: taskLog imprime e publica; fila cheia descarta.
 static void registrar(const char *mensagem) {
   if (filaMensagens != NULL) xQueueSend(filaMensagens, &mensagem, 0);
 }
 
-static Servo servos[2][4];
-static bool executando = false, emMovimento = false;
-static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
-static size_t proximaEtapa = 0;
-static uint8_t bracoMovendo = 0;
-static uint32_t inicioMovimento = 0, duracaoMovimento = 0, ultimaAtualizacao = 0, inicio = 0, espera = 0;
-
-
-#define PARA_ESTEIRA_2      90, 180, 50
-#define PEGA_CUBO_ESTEIRA_2  90, 155, 100
-#define ACIMA_ESTEIRA_2          90, 180, 100
-#define ENTREGA_SAIDA       180, 150, 120
 // O braco que nao recebe comando mantem sua ultima posicao.
 static const Etapa SEQUENCIA[] = {
   {MOVER, 0, {REPOUSO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: repouso."},
@@ -152,7 +103,6 @@ static bool busy_control(void) {
   return executando || emMovimento;
 }
 
-// Para esteira, ciclo e movimento, e descarta comandos JSON pendentes.
 static void cancel_op(const char *msg, cancellation_reason motivo_cancelamento) {
   switch (motivo_cancelamento)
   {
@@ -293,7 +243,6 @@ esp_err_t config_pins(void){
   gpio_config_t io = {0};
   io.pin_bit_mask = 1ULL << PIN_RELE;
   io.mode = GPIO_MODE_OUTPUT;
-  // Manter IN alto quando possivel; pull-down acionaria este rele.
   io.pull_up_en = GPIO_PULLUP_ENABLE;
   io.pull_down_en = GPIO_PULLDOWN_DISABLE;
   io.intr_type = GPIO_INTR_DISABLE;
@@ -534,7 +483,7 @@ static void task_esteira_with_ultrasonic(void *parameter) {
     // }
     leitura.instante_ms = tempoAtualMs();
     xQueueOverwrite(filaSensor, &leitura);
-    // d(TAG, "Distancia: %lu cm, erro: 0x%x", (unsigned long)leitura.distancia_cm, (unsigned)leitura.erro);    
+    // ESP_LOGI(TAG, "Distancia: %lu cm, erro: 0x%x", (unsigned long)leitura.distancia_cm, (unsigned)leitura.erro);    
     vTaskDelay(ticks(PERIODO_SENSOR_MS));
   }
 }
