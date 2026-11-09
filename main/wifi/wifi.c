@@ -45,7 +45,7 @@ bool wifi_got_ip(void)
     return sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0;
 }
 
-void wifi_init_sta(void)
+esp_err_t wifi_init_sta(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -77,4 +77,6 @@ void wifi_init_sta(void)
 
     // A conexao termina em segundo plano; consulte wifi_conectado().
     ESP_LOGI(TAG, "Conectando a \"%s\"...", ESP_WIFI_SSID);
+
+    return ESP_OK;
 }

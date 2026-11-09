@@ -37,8 +37,8 @@ bool comandoJsonParse(const char *dados, size_t tamanho, ComandoJson *saida) {
   const char *acao = action->valuestring;
   if (strcmp(acao, "iniciar") == 0) comando.acao = JSON_INICIAR;
   else if (strcmp(acao, "parar") == 0) comando.acao = JSON_PARAR;
-  else if (strcmp(acao, "abrir_garra") == 0) comando.acao = JSON_ABRIR_GARRA;
-  else if (strcmp(acao, "fechar_garra") == 0) comando.acao = JSON_FECHAR_GARRA;
+  // else if (strcmp(acao, "abrir_garra") == 0) comando.acao = JSON_ABRIR_GARRA;
+  // else if (strcmp(acao, "fechar_garra") == 0) comando.acao = JSON_FECHAR_GARRA;
   else if (strcmp(acao, "repouso") == 0) comando.acao = JSON_REPOUSO;
   else {
     static const char *const nomes[] = {

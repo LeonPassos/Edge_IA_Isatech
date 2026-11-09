@@ -28,6 +28,9 @@
 // Topicos da aplicacao. O estado online/offline fica em MQTT_TOPICO_ESTADO.
 #define TOPICO_COMANDO "isatech/comando" // i/iniciar, p/parar ou JSON
 #define TOPICO_LOG     "isatech/log"     // mensagens do ciclo
+#define TOPICO_CARRINHO "isatech/carrinho"
+// Last Will: o broker publica "offline" (retido) se a ESP sumir.
+#define MQTT_TOPICO_ESTADO  "isatech/status"
 
 // Bits de notificacao enviados a taskControle pelo MQTT.
 // Se iniciar e parar estiverem pendentes juntos, parar prevalece.
@@ -38,28 +41,18 @@
 #define SERVO_MIN_US 500
 #define SERVO_MAX_US 2500
 
-//duty cycle do PWM para 0 a 180 graus
-#define SERVO_BASE_MIN_US 500
-#define SERVO_BASE_MAX_US 2500
-
-#define SERVO_OMBRO_MIN_US 1000
-#define SERVO_OMBRO_MAX_US 2000
-
-#define SERVO_COTOVELO_MIN_US 500
-#define SERVO_COTOVELO_MAX_US 2500
-
-#define SERVO_GARRA_MIN_US 500
-#define SERVO_GARRA_MAX_US 2500
-
-#define PIN_RELE GPIO_NUM_25
+#define PIN_RELE GPIO_NUM_33
 #define ATUALIZACAO_SERVO_MS 20
-#define VELOCIDADE_GRAUS_S 70.0f
+#define VELOCIDADE_GRAUS_S 60.0f
+// Rele ativo em nivel baixo: IN em GND liga; IN em nivel alto desliga.
 #define RELE_LIGADO 0
-#define RELE_DESLIGADO (RELE_LIGADO == 0 ? 1 : 0)
+#define RELE_DESLIGADO 1
 #define MOVIMENTO_MS 1500
 #define GARRA_MS 700
 #define ESTEIRA_MS 12000
 #define ACOMODAR_MS 700
+
+//#DEFINE ULTIMO PINO GPIO 32
 
 // Coordenadas em graus. Servo posicional; nao usar servo de rotacao continua.
 typedef struct {
@@ -76,6 +69,11 @@ typedef enum {
     DESLIGAR_ESTEIRA,
 } Acao;
 
+typedef enum  {
+  MOTIVO_SENSOR, 
+  MOTIVO_COMANDO 
+}cancellation_reason;
+
 typedef struct {
   Acao acao;
   uint8_t braco;
@@ -83,6 +81,12 @@ typedef struct {
   uint32_t tempo;
   const char *mensagem;
 } Etapa;
+
+typedef struct {
+  esp_err_t erro;
+  uint32_t distancia_cm;
+  uint32_t instante_ms;
+} LeituraSensor;
 
 
 #endif // __MAIN_H__

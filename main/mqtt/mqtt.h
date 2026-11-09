@@ -4,14 +4,14 @@
 #include <stdbool.h>
 #include <esp_err.h>
 #include "wifi/wifi.h"
+#include "../main.h"
 
-#define MQTT_BROKER_URI     "mqtt://192.168.1.68:1883"
+#define MQTT_BROKER_URI     "mqtt://192.168.10.110:1883"
 #define MQTT_KEEPALIVE_S    15
 #define MQTT_RECONEXAO_MS   5000
 #define MQTT_PRIORIDADE     1     // Abaixo do controle (2): rede nao atrasa os servos.
 
-// Last Will: o broker publica "offline" (retido) se a ESP sumir.
-#define MQTT_TOPICO_ESTADO  "isatech/status"
+
 
 // Callbacks rodam na tarefa interna do esp-mqtt: devem ser curtos.
 typedef void (*mqtt_on_conexao_t)(bool conectado, void *ctx);
