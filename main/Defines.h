@@ -52,7 +52,7 @@
 #define ENTREGA_ESTEIRA         90, 100, 115
 
 #define PARA_ESTEIRA_2          90, 180, 50
-#define PEGA_CUBO_ESTEIRA_2     90, 155, 100
+#define PEGA_CUBO_ESTEIRA_2     90, 160, 100
 #define ACIMA_ESTEIRA_2         90, 180, 100
 #define ENTREGA_SAIDA           180, 150, 120
 

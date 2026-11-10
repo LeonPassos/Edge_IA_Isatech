@@ -143,6 +143,12 @@ static void atualizarSensor(void) {
     // Antecipar a etapa DESLIGAR_ESTEIRA, que conta o tempo de acomodacao.
     espera = 0;
     registrar("Objeto detectado a menos de 12 cm: esteira parada.");
+    const esp_err_t erro = mqtt_publish(TOPICO_CARRINHO, "Iniciar", 1, false);
+    if (erro == ESP_OK) {
+      ESP_LOGI(TAG, "Deteccao: comando Iniciar enviado para %s", TOPICO_CARRINHO);
+    } else {
+      ESP_LOGE(TAG, "Falha ao enviar Iniciar para o carrinho: %s", esp_err_to_name(erro));
+    }
   }
 }
 
@@ -196,7 +202,7 @@ static void atualizar(void) {
     pararEsteira();
     executando = false;
     ESP_LOGI(TAG, "Ciclo concluido. Mandando comando MQTT para o carrinho.");
-    mqtt_publish(TOPICO_CARRINHO, "Finalizar", 0, false);
+    mqtt_publish(TOPICO_CARRINHO, "Finalizar", 1, false);
     registrar("Ciclo concluido. Envie i para repetir.");
     return;
   }
@@ -213,10 +219,13 @@ static void atualizar(void) {
       // cancel_op("Ciclo cancelado: sensor sem leitura valida. Confira o sensor e envie iniciar.", MOTIVO_SENSOR);
       //   return;
       // }
-      if (ultimaLeitura.distancia_cm < LIMITE_DISTANCIA) {
-        mqtt_publish(TOPICO_CARRINHO, "Iniciar", 0, false);
+      if (sensorValido() && ultimaLeitura.distancia_cm < LIMITE_DISTANCIA) {
         pararEsteira();
         espera = 0;
+        const esp_err_t erro = mqtt_publish(TOPICO_CARRINHO, "Iniciar", 1, false);
+        if (erro != ESP_OK) {
+          ESP_LOGE(TAG, "Falha ao enviar Iniciar para o carrinho: %s", esp_err_to_name(erro));
+        }
         registrar("Objeto ja detectado a menos de 12 cm: esteira permanece parada.");
         return;
       }
@@ -549,5 +558,7 @@ void app_main(void) {
   if (mqtt_init() != ESP_OK) {
     ESP_LOGE(TAG, "Falha ao iniciar MQTT; nenhum comando sera recebido.");
   }
+
+  mqtt_publish(TOPICO_CARRINHO, "Iniciar", 1, false);
 
 }
