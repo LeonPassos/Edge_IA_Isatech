@@ -42,6 +42,9 @@ static uint8_t bracoJoystick = 0;
 static uint8_t motorJoystick = 0; // 0 base, 1 ombro, 2 cotovelo, 3 garra.
 static uint32_t ultimoJoystick = 0;
 static float residuoJoystick = 0; // Fracao de grau acumulada.
+// Copia de braco/motor (braco << 8 | motor) para a pagina ler sem tocar no controle.
+static _Atomic uint16_t selecaoPublicada = 0;
+static QueueHandle_t filaSelecao = NULL;
 static LeituraSensor ultimaLeitura = {.erro = ESP_ERR_INVALID_STATE};
 static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
 static size_t proximaEtapa = 0;
@@ -379,16 +382,29 @@ static void moverComJoystick(void) {
   servo_Set_Angle(&servos[b][m], angulo);
 }
 
-static void trocarMotorJoystick(void) {
-  static const char *const MENSAGENS[4] = {
+// Unico ponto que altera braco/motor do joystick. Usado pelo botao e pela pagina.
+static void selecionarJoystick(uint8_t braco, uint8_t motor) {
+  static const char *const MSG_MOTOR[4] = {
     "Joystick: base selecionada.",
     "Joystick: ombro selecionado.",
     "Joystick: cotovelo selecionado.",
     "Joystick: garra selecionada."
   };
-  motorJoystick = (motorJoystick + 1) % 4;
+  static const char *const MSG_BRACO[2] = {
+    "Joystick: braco 1 selecionado.",
+    "Joystick: braco 2 selecionado."
+  };
+  if (braco >= BRACOS_ATIVOS || motor >= 4) return;
+  if (braco != bracoJoystick) registrar(MSG_BRACO[braco]);
+  if (motor != motorJoystick) registrar(MSG_MOTOR[motor]);
+  bracoJoystick = braco;
+  motorJoystick = motor;
   residuoJoystick = 0;
-  registrar(MENSAGENS[motorJoystick]);
+  atomic_store(&selecaoPublicada, (uint16_t)(braco << 8 | motor));
+}
+
+static void trocarMotorJoystick(void) {
+  selecionarJoystick(bracoJoystick, (motorJoystick + 1) % 4);
 }
 
 static void trocarBracoJoystick(void) {
@@ -396,9 +412,12 @@ static void trocarBracoJoystick(void) {
     registrar("Joystick: somente um braco ativo.");
     return;
   }
-  bracoJoystick = (bracoJoystick + 1) % BRACOS_ATIVOS;
-  residuoJoystick = 0;
-  registrar(bracoJoystick == 0 ? "Joystick: braco 1 selecionado." : "Joystick: braco 2 selecionado.");
+  selecionarJoystick((bracoJoystick + 1) % BRACOS_ATIVOS, motorJoystick);
+}
+
+static void aplicarSelecaoWeb(void) {
+  SelecaoJoystick s;
+  if (xQueueReceive(filaSelecao, &s, 0) == pdTRUE) selecionarJoystick(s.braco, s.motor);
 }
 
 static void iniciarCiclo(void) {
@@ -456,6 +475,10 @@ static void taskControle() {
 
       if (comandos & CMD_JOY_CLIQUE) {
         trocarMotorJoystick();
+      }
+
+      if (comandos & CMD_WEB_SELECAO) {
+        aplicarSelecaoWeb();
       }
 
       if (comandos & CMD_JOY_EIXOS) {
@@ -573,6 +596,19 @@ static void task_esteira_with_ultrasonic(void *parameter) {
   }
 }
 
+// Executados na tarefa do servidor HTTP: so leem a copia atomica ou repassam ao controle.
+static SelecaoJoystick lerSelecaoWeb(void *ctx) {
+  (void)ctx;
+  const uint16_t v = atomic_load(&selecaoPublicada);
+  return (SelecaoJoystick){.braco = v >> 8, .motor = v & 0xFF};
+}
+
+static void aoSelecionarWeb(SelecaoJoystick selecao, void *ctx) {
+  (void)ctx;
+  xQueueOverwrite(filaSelecao, &selecao);
+  xTaskNotify(controleHandle, CMD_WEB_SELECAO, eSetBits);
+}
+
 // Esta tarefa somente le o joystick e avisa o controle; nunca move servos.
 static void taskJoystick(void *parameter) {
   (void)parameter;
@@ -624,13 +660,15 @@ void app_main(void) {
   filaComandos = xQueueCreate(8, sizeof(ComandoJson));
   filaSensor = xQueueCreate(1, sizeof(LeituraSensor));
   filaJoystick = xQueueCreate(1, sizeof(JoystickLeitura));
+  filaSelecao = xQueueCreate(1, sizeof(SelecaoJoystick));
 
-  if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL || filaJoystick == NULL) {
+  if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL || filaJoystick == NULL || filaSelecao == NULL) {
     if (filaMensagens) vQueueDelete(filaMensagens);
     if (filaComandos) vQueueDelete(filaComandos);
     if (filaSensor) vQueueDelete(filaSensor);
     if (filaJoystick) vQueueDelete(filaJoystick);
-    filaSensor = filaJoystick = NULL;
+    if (filaSelecao) vQueueDelete(filaSelecao);
+    filaSensor = filaJoystick = filaSelecao = NULL;
     filaMensagens = filaComandos = NULL;
     pararEsteira();
     ESP_LOGE(TAG, "Falha ao criar fila RTOS. Reinicie a ESP32.");
@@ -642,7 +680,8 @@ void app_main(void) {
     vQueueDelete(filaComandos);
     vQueueDelete(filaSensor);
     vQueueDelete(filaJoystick);
-    filaSensor = filaJoystick = NULL;
+    vQueueDelete(filaSelecao);
+    filaSensor = filaJoystick = filaSelecao = NULL;
     filaComandos = NULL;
     filaMensagens = NULL;
     pararEsteira();
@@ -663,6 +702,11 @@ void app_main(void) {
   // Opcional: sem joystick, o controle segue pelo MQTT normalmente.
   if (xTaskCreate(taskJoystick, "Joystick", 3072, NULL, 1, NULL) != pdPASS) {
     ESP_LOGE(TAG, "Falha ao criar tarefa do joystick.");
+  }
+
+  // Pagina na mesma rede do MQTT; o link (http://<ip>/) aparece no log ao receber IP.
+  if (web_init(lerSelecaoWeb, aoSelecionarWeb, BRACOS_ATIVOS, NULL) != ESP_OK) {
+    ESP_LOGE(TAG, "Falha ao iniciar a pagina web; joystick segue pelo botao.");
   }
 
   // MQTT conecta quando o Wi-Fi recebe IP. E a unica entrada de comandos.

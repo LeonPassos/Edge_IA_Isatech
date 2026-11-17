@@ -23,6 +23,7 @@
 #define CMD_JOY_EIXOS  (1UL << 3) // Ha leitura nova em filaJoystick.
 #define CMD_JOY_CLIQUE (1UL << 4) // Clique simples: troca o motor (base, ombro, cotovelo, garra).
 #define CMD_JOY_DUPLO  (1UL << 5) // Duplo clique: troca o braco controlado.
+#define CMD_WEB_SELECAO (1UL << 6) // Ha selecao nova da pagina em filaSelecao.
 
 #define SERVO_MIN_US 500
 #define SERVO_MAX_US 2500

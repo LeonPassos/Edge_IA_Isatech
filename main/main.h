@@ -40,6 +40,9 @@
 //Joystick
 #include "joystick/joystick.h"
 
+//Pagina web
+#include "web/web.h"
+
 //Servo
 #include <driver/ledc.h>
 #include "servo/servo.h"

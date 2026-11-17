@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edge IA - Joystick</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --txt:#1d2330; --sub:#5c6575; --borda:#d5d9e0; --ativo:#1f6feb; --ativo-txt:#fff; --ok:#1a7f37; --erro:#cf222e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1218; --card:#181c24; --txt:#e6e9ef; --sub:#9aa3b2; --borda:#2c3340; --ativo:#2f81f7; --ok:#3fb950; --erro:#f85149; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:480px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  #status { font-size:.85rem; color:var(--sub); margin-bottom:20px; }
+  #status.ok::before { content:"● "; color:var(--ok); }
+  #status.erro::before { content:"● "; color:var(--erro); }
+  section { background:var(--card); border:1px solid var(--borda); border-radius:12px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--sub); margin:0 0 12px; }
+  .atual { font-size:1.6rem; font-weight:600; margin-bottom:12px; }
+  .grade { display:grid; gap:8px; }
+  .g2 { grid-template-columns:repeat(2,1fr); }
+  .g4 { grid-template-columns:repeat(2,1fr); }
+  @media (min-width:420px) { .g4 { grid-template-columns:repeat(4,1fr); } }
+  button { font:inherit; font-size:1rem; padding:14px 8px; border-radius:10px; border:1px solid var(--borda); background:transparent; color:var(--txt); cursor:pointer; }
+  button[aria-pressed="true"] { background:var(--ativo); border-color:var(--ativo); color:var(--ativo-txt); font-weight:600; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  p.dica { font-size:.8rem; color:var(--sub); margin:0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Controle do joystick</h1>
+  <div id="status">Conectando...</div>
+
+  <section>
+    <h2>Braço em uso</h2>
+    <div class="atual" id="bracoAtual">-</div>
+    <div class="grade g2" id="bracos">
+      <button data-braco="0">Braço 1</button>
+      <button data-braco="1">Braço 2</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Motor em uso</h2>
+    <div class="atual" id="motorAtual">-</div>
+    <div class="grade g4" id="motores">
+      <button data-motor="0">Base</button>
+      <button data-motor="1">Ombro</button>
+      <button data-motor="2">Cotovelo</button>
+      <button data-motor="3">Garra</button>
+    </div>
+  </section>
+
+  <p class="dica">O botão do joystick continua funcionando: 1 clique troca o motor, 2 cliques trocam o braço.</p>
+</main>
+<script>
+  const MOTORES = ["Base", "Ombro", "Cotovelo", "Garra"];
+  const status = document.getElementById("status");
+
+  function mostrar(e) {
+    document.getElementById("bracoAtual").textContent = "Braço " + (e.braco + 1);
+    document.getElementById("motorAtual").textContent = MOTORES[e.motor];
+    document.querySelectorAll("[data-braco]").forEach(b => {
+      const n = Number(b.dataset.braco);
+      b.disabled = n >= e.bracos;
+      b.setAttribute("aria-pressed", n === e.braco);
+    });
+    document.querySelectorAll("[data-motor]").forEach(b => {
+      b.setAttribute("aria-pressed", Number(b.dataset.motor) === e.motor);
+    });
+    status.textContent = "Conectado";
+    status.className = "ok";
+  }
+
+  async function atualizar() {
+    try {
+      const r = await fetch("/estado", {cache: "no-store"});
+      if (!r.ok) throw new Error(r.status);
+      mostrar(await r.json());
+    } catch (err) {
+      status.textContent = "Sem conexão com a ESP32";
+      status.className = "erro";
+    }
+  }
+
+  async function selecionar(param, valor) {
+    try {
+      const r = await fetch("/selecionar?" + param + "=" + valor, {method: "POST"});
+      if (!r.ok) throw new Error(await r.text());
+    } catch (err) {
+      status.textContent = "Falha ao selecionar: " + err.message;
+      status.className = "erro";
+    }
+    setTimeout(atualizar, 100);
+  }
+
+  document.getElementById("bracos").addEventListener("click", ev => {
+    const b = ev.target.closest("[data-braco]");
+    if (b && !b.disabled) selecionar("braco", b.dataset.braco);
+  });
+  document.getElementById("motores").addEventListener("click", ev => {
+    const b = ev.target.closest("[data-motor]");
+    if (b) selecionar("motor", b.dataset.motor);
+  });
+
+  atualizar();
+  setInterval(atualizar, 500);
+</script>
+</body>
+</html>
