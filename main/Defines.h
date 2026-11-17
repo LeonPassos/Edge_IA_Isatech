@@ -26,12 +26,13 @@
 
 #define PIN_RELE GPIO_NUM_33
 #define ATUALIZACAO_SERVO_MS 20
-#define VELOCIDADE_GRAUS_S 60.0f
+#define VELOCIDADE_GRAUS_S 50.0f
+#define VELOCIDADE_FECHAR_GARRA_2_GRAUS_S 20.0f
 // Rele ativo em nivel baixo: IN em GND liga; IN em nivel alto desliga.
 #define RELE_LIGADO 0
 #define RELE_DESLIGADO 1
 #define MOVIMENTO_MS 1500
-#define GARRA_MS 700
+#define GARRA_MS 2500
 #define ESTEIRA_MS 12000
 #define ACOMODAR_MS 700
 
@@ -45,16 +46,17 @@
 #define FECHADA_2 90
 // Base, ombro e cotovelo de cada posicao; a garra vem em cada etapa.
 #define REPOUSO                 90, 120, 90
-#define REPOUSO_2               90, 180, 50
+#define REPOUSO_2               90, 150, 50
 #define ACIMA_CUBO              0, 120, 90
-#define PEGA_CUBO               0, 70,  110
-#define ACIMA_ESTEIRA_1         90, 130, 115
-#define ENTREGA_ESTEIRA         90, 100, 115
+#define DESCER_PARA_CUBO        0, 75,  90
+#define PEGA_CUBO               0, 75,  110
+#define ACIMA_ESTEIRA_1         85, 130, 115
+#define ENTREGA_ESTEIRA         85, 100, 115
 
-#define PARA_ESTEIRA_2          90, 180, 50
-#define PEGA_CUBO_ESTEIRA_2     90, 160, 100
-#define ACIMA_ESTEIRA_2         90, 180, 100
-#define ENTREGA_SAIDA           180, 150, 120
+#define PARA_ESTEIRA_2          90, 150, 50
+#define PEGA_CUBO_ESTEIRA_2     90, 135, 90
+#define ACIMA_ESTEIRA_2         90, 150, 90
+#define ENTREGA_SAIDA           180, 130, 120
 
 
 
@@ -65,6 +67,6 @@
 #define TRIGGER_GPIO 5
 #define ECHO_GPIO 17
 #define PERIODO_SENSOR_MS 50
-#define VALIDADE_SENSOR_MS 50
+#define VALIDADE_SENSOR_MS 20
 
 #endif // DEFINES_H

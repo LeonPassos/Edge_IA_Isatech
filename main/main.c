@@ -6,7 +6,7 @@ static const char *TAG = "main";
 static const ServoCfg cfg[4] = {
   //o de vdd é o primeiro 
   {"Base",     18, 0, 180, 90},
-  {"Ombro",    19, 0, 180, 90},
+  {"Ombro",    19, 0, 180, 120},
   {"Cotovelo", 23, 0, 180, 90},
   {"Garra",    12, 0, 180, 90}
   // {"Base",     16, 0, 180, 90},
@@ -17,7 +17,7 @@ static const ServoCfg cfg[4] = {
 static const ServoCfg cfgSegundoBraco[4] = {
   
   {"Base",     14, 0, 180, 90},
-  {"Ombro",    27, 0, 180, 170},
+  {"Ombro",    27, 0, 180, 150},
   {"Cotovelo", 26, 0, 180, 50},
   {"Garra",    25, 0, 180, 90}
   // {"Base",     13, 0, 180, 90},
@@ -42,6 +42,7 @@ static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
 static size_t proximaEtapa = 0;
 static uint8_t bracoMovendo = 0;
 static uint32_t inicioMovimento = 0, duracaoMovimento = 0, ultimaAtualizacao = 0, inicio = 0, espera = 0;
+static uint32_t duracaoOutrosEixos = 0, duracaoGarra = 0;
 static bool leituraRecebida = false, esteiraLigada = false, executando = false, emMovimento = false;;
 
 
@@ -63,7 +64,8 @@ static const Etapa SEQUENCIA[] = {
   {MOVER, 0, {REPOUSO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: repouso."},
   {MOVER, 1, {REPOUSO_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: repouso."},
   {MOVER, 0, {ACIMA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: acima do cubo."},
-  {MOVER, 0, {PEGA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: descer para pegar."},
+  {MOVER, 0, {DESCER_PARA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: descer para pegar."},
+  {MOVER, 0, {PEGA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: pegar cubo."},
   {GARRA, 0, {0, 0, 0, FECHADA_1}, GARRA_MS, "Braco 1: fechar garra."},
   {MOVER, 0, {ACIMA_CUBO, FECHADA_1}, MOVIMENTO_MS, "Braco 1: levantar cubo."},
   {MOVER, 0, {ACIMA_ESTEIRA_1, FECHADA_1}, MOVIMENTO_MS, "Braco 1: acima da esteira."},
@@ -75,7 +77,7 @@ static const Etapa SEQUENCIA[] = {
   {DESLIGAR_ESTEIRA, 0, {0, 0, 0, 0}, ACOMODAR_MS, "Aguardando parada da esteira."},
   {MOVER, 1, {PARA_ESTEIRA_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: acima do cubo."},
   {MOVER, 1, {PEGA_CUBO_ESTEIRA_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: descer para pegar."},
-  {GARRA, 1, {0, 0, 0, FECHADA_2}, GARRA_MS, "Braco 2: fechar garra."},
+  {GARRA, 1, {0, 0, 0, FECHADA_2}, MOVIMENTO_MS, "Braco 2: fechar garra."},
   {MOVER, 1, {ACIMA_ESTEIRA_2, FECHADA_2}, MOVIMENTO_MS, "Braco 2: levantar cubo."},
   {MOVER, 1, {ACIMA_ESTEIRA_2, FECHADA_2}, MOVIMENTO_MS, "Braco 2: acima da saida."},
   {MOVER, 1, {ENTREGA_SAIDA, FECHADA_2}, MOVIMENTO_MS, "Braco 2: baixar cubo."},
@@ -171,6 +173,17 @@ static void mover(uint8_t braco, const Pose *p) {
   // Smoothstep tem velocidade maxima 1,5 vezes a velocidade media.
   duracaoMovimento = (uint32_t)(1500.0f * maiorDeslocamento / VELOCIDADE_GRAUS_S);
   if (duracaoMovimento < 1) duracaoMovimento = 1;
+  duracaoOutrosEixos = duracaoMovimento;
+  duracaoGarra = duracaoMovimento;
+  // Somente a garra 2, ao se mover no sentido de fechamento.
+  const int deslocamentoGarra = destino[3] - origem[3];
+  if (braco == 1 &&
+      ((FECHADA_2 < ABERTA_2 && deslocamentoGarra < 0) ||
+       (FECHADA_2 > ABERTA_2 && deslocamentoGarra > 0))) {
+    const uint32_t duracaoFechamento = (uint32_t)(1500.0f * abs(deslocamentoGarra) / VELOCIDADE_FECHAR_GARRA_2_GRAUS_S);
+    if (duracaoFechamento > duracaoGarra) duracaoGarra = duracaoFechamento;
+    if (duracaoGarra > duracaoMovimento) duracaoMovimento = duracaoGarra;
+  }
   inicioMovimento = tempoAtualMs();
   ultimaAtualizacao = inicioMovimento;
   emMovimento = true;
@@ -182,9 +195,10 @@ static void atualizarMovimento(void) {
   const uint32_t decorrido = agora - inicioMovimento;
   if (decorrido < duracaoMovimento && agora - ultimaAtualizacao < ATUALIZACAO_SERVO_MS) return;
   ultimaAtualizacao = agora;
-  const float t = decorrido >= duracaoMovimento ? 1.0f : (float)decorrido / duracaoMovimento;
-  const float suave = t * t * (3.0f - 2.0f * t);
   for (uint8_t eixo = 0; eixo < 4; ++eixo) {
+    const uint32_t duracao = eixo == 3 ? duracaoGarra : duracaoOutrosEixos;
+    const float t = decorrido >= duracao ? 1.0f : (float)decorrido / duracao;
+    const float suave = t * t * (3.0f - 2.0f * t);
     const int angulo = (int)lroundf(origem[eixo] + (destino[eixo] - origem[eixo]) * suave);
     posicao[bracoMovendo][eixo] = angulo;
     servo_Set_Angle(&servos[bracoMovendo][eixo], angulo);
