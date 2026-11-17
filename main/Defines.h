@@ -24,6 +24,8 @@
 #define CMD_JOY_CLIQUE (1UL << 4) // Clique simples: troca o motor (base, ombro, cotovelo, garra).
 #define CMD_JOY_DUPLO  (1UL << 5) // Duplo clique: troca o braco controlado.
 #define CMD_WEB_SELECAO (1UL << 6) // Ha selecao nova da pagina em filaSelecao.
+#define CMD_ESTEIRA_LIGAR    (1UL << 7) // Pagina: ligar esteira (fora do ciclo).
+#define CMD_ESTEIRA_DESLIGAR (1UL << 8) // Pagina: desligar esteira.
 
 #define SERVO_MIN_US 500
 #define SERVO_MAX_US 2500

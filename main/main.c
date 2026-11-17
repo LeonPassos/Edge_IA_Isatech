@@ -44,6 +44,8 @@ static uint32_t ultimoJoystick = 0;
 static float residuoJoystick = 0; // Fracao de grau acumulada.
 // Copia de braco/motor (braco << 8 | motor) para a pagina ler sem tocar no controle.
 static _Atomic uint16_t selecaoPublicada = 0;
+// Copia de executando/esteiraLigada, atualizada pelo controle a cada iteracao.
+static atomic_bool executandoPublicado = false, esteiraPublicada = false;
 static QueueHandle_t filaSelecao = NULL;
 static LeituraSensor ultimaLeitura = {.erro = ESP_ERR_INVALID_STATE};
 static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
@@ -440,6 +442,26 @@ static void processarComandosJson(void) {
   }
 }
 
+// Esteira avulsa pela pagina. Durante o ciclo, quem manda e a sequencia.
+static void ligarEsteiraManual(void) {
+  if (executando) {
+    registrar("Esteira: ciclo em execucao; envie parar antes de ligar manualmente.");
+    return;
+  }
+  atualizarSensor(); // Pega a leitura mais recente antes de decidir.
+  if (sensorValido() && ultimaLeitura.distancia_cm < LIMITE_DISTANCIA) {
+    registrar("Esteira: objeto na frente do sensor; esteira nao ligada.");
+    return;
+  }
+  iniciarEsteira();
+  registrar("Esteira ligada pela pagina.");
+}
+
+static void desligarEsteiraManual(void) {
+  pararEsteira();
+  registrar("Esteira desligada pela pagina.");
+}
+
 // Ocioso: dorme ate chegar um comando. Com movimento, ciclo ou esteira em
 // andamento, acorda a cada periodo para animar servos e seguir as etapas.
 static TickType_t wait_time(void) {
@@ -485,6 +507,13 @@ static void taskControle() {
         moverComJoystick();
       }
 
+      // Desligar prevalece se ambos chegarem juntos.
+      if (comandos & CMD_ESTEIRA_DESLIGAR) {
+        desligarEsteiraManual();
+      } else if (comandos & CMD_ESTEIRA_LIGAR) {
+        ligarEsteiraManual();
+      }
+
     }
 
     atualizarSensor();
@@ -498,6 +527,9 @@ static void taskControle() {
     }
 
     atualizar();
+
+    atomic_store(&executandoPublicado, executando);
+    atomic_store(&esteiraPublicada, esteiraLigada);
   }
 }
 
@@ -597,16 +629,39 @@ static void task_esteira_with_ultrasonic(void *parameter) {
 }
 
 // Executados na tarefa do servidor HTTP: so leem a copia atomica ou repassam ao controle.
-static SelecaoJoystick lerSelecaoWeb(void *ctx) {
+static EstadoWeb lerEstadoWeb(void *ctx) {
   (void)ctx;
   const uint16_t v = atomic_load(&selecaoPublicada);
-  return (SelecaoJoystick){.braco = v >> 8, .motor = v & 0xFF};
+  return (EstadoWeb){
+    .selecao = {.braco = v >> 8, .motor = v & 0xFF},
+    .executando = atomic_load(&executandoPublicado),
+    .esteira = atomic_load(&esteiraPublicada),
+    .mqtt = if_mqtt_conectado(),
+  };
 }
 
 static void aoSelecionarWeb(SelecaoJoystick selecao, void *ctx) {
   (void)ctx;
   xQueueOverwrite(filaSelecao, &selecao);
   xTaskNotify(controleHandle, CMD_WEB_SELECAO, eSetBits);
+}
+
+static esp_err_t aoAcaoWeb(WebAcao acao, void *ctx) {
+  (void)ctx;
+  switch (acao) {
+    case WEB_INICIAR: xTaskNotify(controleHandle, CMD_INICIAR, eSetBits); break;
+    case WEB_PARAR: xTaskNotify(controleHandle, CMD_PARAR, eSetBits); break;
+    case WEB_ESTEIRA_LIGAR: xTaskNotify(controleHandle, CMD_ESTEIRA_LIGAR, eSetBits); break;
+    case WEB_ESTEIRA_DESLIGAR: xTaskNotify(controleHandle, CMD_ESTEIRA_DESLIGAR, eSetBits); break;
+    case WEB_CARRINHO: {
+      // Publicar aqui mantem a rede fora da tarefa de controle.
+      const esp_err_t erro = mqtt_publish(TOPICO_CARRINHO, "Iniciar", 1, false);
+      registrar(erro == ESP_OK ? "Pagina: Iniciar enviado ao carrinho." : "Pagina: falha ao enviar Iniciar ao carrinho.");
+      return erro;
+    }
+    default: return ESP_ERR_INVALID_ARG;
+  }
+  return ESP_OK;
 }
 
 // Esta tarefa somente le o joystick e avisa o controle; nunca move servos.
@@ -705,7 +760,13 @@ void app_main(void) {
   }
 
   // Pagina na mesma rede do MQTT; o link (http://<ip>/) aparece no log ao receber IP.
-  if (web_init(lerSelecaoWeb, aoSelecionarWeb, BRACOS_ATIVOS, NULL) != ESP_OK) {
+  const WebCallbacks callbacksWeb = {
+    .ler_estado = lerEstadoWeb,
+    .on_selecao = aoSelecionarWeb,
+    .on_acao = aoAcaoWeb,
+    .ctx = NULL,
+  };
+  if (web_init(&callbacksWeb, BRACOS_ATIVOS) != ESP_OK) {
     ESP_LOGE(TAG, "Falha ao iniciar a pagina web; joystick segue pelo botao.");
   }
 

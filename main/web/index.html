@@ -3,19 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Edge IA - Joystick</title>
+<title>Edge IA - Controle</title>
 <style>
-  :root { --bg:#f4f5f7; --card:#fff; --txt:#1d2330; --sub:#5c6575; --borda:#d5d9e0; --ativo:#1f6feb; --ativo-txt:#fff; --ok:#1a7f37; --erro:#cf222e; }
+  :root { --bg:#f4f5f7; --card:#fff; --txt:#1d2330; --sub:#5c6575; --borda:#d5d9e0; --ativo:#1f6feb; --ativo-txt:#fff; --ok:#1a7f37; --erro:#cf222e; --aviso:#9a6700; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#0f1218; --card:#181c24; --txt:#e6e9ef; --sub:#9aa3b2; --borda:#2c3340; --ativo:#2f81f7; --ok:#3fb950; --erro:#f85149; }
+    :root { --bg:#0f1218; --card:#181c24; --txt:#e6e9ef; --sub:#9aa3b2; --borda:#2c3340; --ativo:#2f81f7; --ok:#3fb950; --erro:#f85149; --aviso:#d29922; }
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--txt); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   main { max-width:480px; margin:0 auto; padding:24px 16px; }
   h1 { font-size:1.3rem; margin:0 0 4px; }
   #status { font-size:.85rem; color:var(--sub); margin-bottom:20px; }
-  #status.ok::before { content:"● "; color:var(--ok); }
-  #status.erro::before { content:"● "; color:var(--erro); }
+  .ponto::before { content:"● "; }
+  .ok::before { color:var(--ok); }
+  .erro::before { color:var(--erro); }
+  .aviso::before { color:var(--aviso); }
   section { background:var(--card); border:1px solid var(--borda); border-radius:12px; padding:16px; margin-bottom:16px; }
   h2 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--sub); margin:0 0 12px; }
   .atual { font-size:1.6rem; font-weight:600; margin-bottom:12px; }
@@ -23,16 +25,41 @@
   .g2 { grid-template-columns:repeat(2,1fr); }
   .g4 { grid-template-columns:repeat(2,1fr); }
   @media (min-width:420px) { .g4 { grid-template-columns:repeat(4,1fr); } }
-  button { font:inherit; font-size:1rem; padding:14px 8px; border-radius:10px; border:1px solid var(--borda); background:transparent; color:var(--txt); cursor:pointer; }
-  button[aria-pressed="true"] { background:var(--ativo); border-color:var(--ativo); color:var(--ativo-txt); font-weight:600; }
+  button { font:inherit; font-size:1rem; padding:14px 8px; border-radius:10px; border:1px solid var(--borda); background:transparent; color:var(--txt); cursor:pointer; width:100%; }
+  button[aria-pressed="true"], button.primario { background:var(--ativo); border-color:var(--ativo); color:var(--ativo-txt); font-weight:600; }
+  button.perigo { background:var(--erro); border-color:var(--erro); color:#fff; font-weight:600; }
   button:disabled { opacity:.4; cursor:not-allowed; }
-  p.dica { font-size:.8rem; color:var(--sub); margin:0; }
+  p.dica { font-size:.8rem; color:var(--sub); margin:12px 0 0; }
+  #aviso { min-height:1.2em; font-size:.85rem; color:var(--erro); margin:-8px 0 16px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Controle do joystick</h1>
-  <div id="status">Conectando...</div>
+  <h1>Edge IA</h1>
+  <div id="status" class="ponto">Conectando...</div>
+  <div id="aviso" role="status"></div>
+
+  <section>
+    <h2>Processo</h2>
+    <div class="atual ponto" id="processoAtual">-</div>
+    <div class="grade g2">
+      <button class="primario" id="btnIniciar">Iniciar</button>
+      <button class="perigo" id="btnParar">Parar</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Esteira</h2>
+    <div class="atual ponto" id="esteiraAtual">-</div>
+    <button id="btnEsteira">Ligar esteira</button>
+    <p class="dica">Fora do ciclo. Ao detectar objeto, o sensor desliga a esteira e chama o carrinho.</p>
+  </section>
+
+  <section>
+    <h2>Carrinho</h2>
+    <button class="primario" id="btnCarrinho">Mandar carrinho</button>
+    <p class="dica">Publica "Iniciar" no tópico do carrinho via MQTT.</p>
+  </section>
 
   <section>
     <h2>Braço em uso</h2>
@@ -52,17 +79,32 @@
       <button data-motor="2">Cotovelo</button>
       <button data-motor="3">Garra</button>
     </div>
+    <p class="dica">Botão do joystick: 1 clique troca o motor, 2 cliques trocam o braço.</p>
   </section>
-
-  <p class="dica">O botão do joystick continua funcionando: 1 clique troca o motor, 2 cliques trocam o braço.</p>
 </main>
 <script>
   const MOTORES = ["Base", "Ombro", "Cotovelo", "Garra"];
-  const status = document.getElementById("status");
+  const $ = id => document.getElementById(id);
+  let estado = null;
+
+  function marcar(el, texto, classe) {
+    el.textContent = texto;
+    el.className = el.className.replace(/\b(ok|erro|aviso)\b/g, "").trim() + " " + classe;
+  }
 
   function mostrar(e) {
-    document.getElementById("bracoAtual").textContent = "Braço " + (e.braco + 1);
-    document.getElementById("motorAtual").textContent = MOTORES[e.motor];
+    estado = e;
+    marcar($("status"), e.mqtt ? "ESP32 conectada · MQTT online" : "ESP32 conectada · MQTT offline", e.mqtt ? "ok" : "aviso");
+    marcar($("processoAtual"), e.executando ? "Em execução" : "Parado", e.executando ? "ok" : "aviso");
+    marcar($("esteiraAtual"), e.esteira ? "Ligada" : "Desligada", e.esteira ? "ok" : "aviso");
+
+    $("btnIniciar").disabled = e.executando;
+    $("btnEsteira").textContent = e.esteira ? "Desligar esteira" : "Ligar esteira";
+    $("btnEsteira").disabled = e.executando && !e.esteira;
+    $("btnCarrinho").disabled = !e.mqtt;
+
+    $("bracoAtual").textContent = "Braço " + (e.braco + 1);
+    $("motorAtual").textContent = MOTORES[e.motor];
     document.querySelectorAll("[data-braco]").forEach(b => {
       const n = Number(b.dataset.braco);
       b.disabled = n >= e.bracos;
@@ -71,8 +113,6 @@
     document.querySelectorAll("[data-motor]").forEach(b => {
       b.setAttribute("aria-pressed", Number(b.dataset.motor) === e.motor);
     });
-    status.textContent = "Conectado";
-    status.className = "ok";
   }
 
   async function atualizar() {
@@ -81,29 +121,33 @@
       if (!r.ok) throw new Error(r.status);
       mostrar(await r.json());
     } catch (err) {
-      status.textContent = "Sem conexão com a ESP32";
-      status.className = "erro";
+      marcar($("status"), "Sem conexão com a ESP32", "erro");
     }
   }
 
-  async function selecionar(param, valor) {
+  async function enviar(url) {
+    $("aviso").textContent = "";
     try {
-      const r = await fetch("/selecionar?" + param + "=" + valor, {method: "POST"});
+      const r = await fetch(url, {method: "POST"});
       if (!r.ok) throw new Error(await r.text());
     } catch (err) {
-      status.textContent = "Falha ao selecionar: " + err.message;
-      status.className = "erro";
+      $("aviso").textContent = "Falha: " + err.message;
     }
-    setTimeout(atualizar, 100);
+    setTimeout(atualizar, 150);
   }
 
-  document.getElementById("bracos").addEventListener("click", ev => {
+  $("btnIniciar").onclick = () => enviar("/acao?nome=iniciar");
+  $("btnParar").onclick = () => enviar("/acao?nome=parar");
+  $("btnCarrinho").onclick = () => enviar("/acao?nome=carrinho");
+  $("btnEsteira").onclick = () => enviar("/acao?nome=" + (estado && estado.esteira ? "esteira_desligar" : "esteira_ligar"));
+
+  $("bracos").addEventListener("click", ev => {
     const b = ev.target.closest("[data-braco]");
-    if (b && !b.disabled) selecionar("braco", b.dataset.braco);
+    if (b && !b.disabled) enviar("/selecionar?braco=" + b.dataset.braco);
   });
-  document.getElementById("motores").addEventListener("click", ev => {
+  $("motores").addEventListener("click", ev => {
     const b = ev.target.closest("[data-motor]");
-    if (b) selecionar("motor", b.dataset.motor);
+    if (b) enviar("/selecionar?motor=" + b.dataset.motor);
   });
 
   atualizar();
