@@ -37,6 +37,9 @@
 //Ultrasonic
 #include "ultrasonic/ultrasonic.h"
 
+//Joystick
+#include "joystick/joystick.h"
+
 //Servo
 #include <driver/ledc.h>
 #include "servo/servo.h"

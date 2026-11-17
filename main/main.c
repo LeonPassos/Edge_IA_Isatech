@@ -36,7 +36,12 @@ static TaskHandle_t controleHandle = NULL;
 static QueueHandle_t filaMensagens = NULL;
 static QueueHandle_t filaComandos = NULL;
 static QueueHandle_t filaSensor = NULL;
+static QueueHandle_t filaJoystick = NULL;
 static Servo servos[2][4];
+static uint8_t bracoJoystick = 0;
+static uint8_t motorJoystick = 0; // 0 base, 1 ombro, 2 cotovelo, 3 garra.
+static uint32_t ultimoJoystick = 0;
+static float residuoJoystick = 0; // Fracao de grau acumulada.
 static LeituraSensor ultimaLeitura = {.erro = ESP_ERR_INVALID_STATE};
 static int posicao[2][4] = {0}, origem[4] = {0}, destino[4] = {0};
 static size_t proximaEtapa = 0;
@@ -337,6 +342,65 @@ static void executarComandoJson(const ComandoJson *comando) {
   registrar("Comando JSON: movimento iniciado.");
 }
 
+// Controle de velocidade: a deflexao da alavanca define graus por segundo.
+// Escreve direto no servo, sem interpolacao, pois o passo ja e pequeno.
+static void moverComJoystick(void) {
+  JoystickLeitura leitura;
+  if (xQueueReceive(filaJoystick, &leitura, 0) != pdTRUE) return;
+
+  const uint32_t agora = tempoAtualMs();
+  uint32_t dt = agora - ultimoJoystick;
+  ultimoJoystick = agora;
+  if (busy_control()) return;
+  // Alavanca acabou de sair do centro: nao compensar o tempo parado.
+  if (dt > 3 * JOY_PERIODO_MS) {
+    dt = JOY_PERIODO_MS;
+    residuoJoystick = 0;
+  }
+
+  // Vale o eixo da alavanca com maior deflexao, X ou Y.
+  const int entrada = abs(leitura.x) >= abs(leitura.y) ? leitura.x : leitura.y;
+  if (entrada == 0) return;
+  residuoJoystick += JOY_VELOCIDADE_GRAUS_S * entrada / 100.0f * dt / 1000.0f;
+  const int passo = (int)residuoJoystick; // Trunca em direcao ao zero.
+  if (passo == 0) return;
+  residuoJoystick -= passo;
+
+  const uint8_t b = bracoJoystick, m = motorJoystick;
+  const ServoCfg *c = &CONFIG_BRACOS[b][m];
+  int angulo = posicao[b][m] + passo;
+  if (angulo < c->minimo) angulo = c->minimo;
+  if (angulo > c->maximo) angulo = c->maximo;
+  if (angulo == posicao[b][m]) {
+    residuoJoystick = 0; // No limite: nao acumular.
+    return;
+  }
+  posicao[b][m] = angulo;
+  servo_Set_Angle(&servos[b][m], angulo);
+}
+
+static void trocarMotorJoystick(void) {
+  static const char *const MENSAGENS[4] = {
+    "Joystick: base selecionada.",
+    "Joystick: ombro selecionado.",
+    "Joystick: cotovelo selecionado.",
+    "Joystick: garra selecionada."
+  };
+  motorJoystick = (motorJoystick + 1) % 4;
+  residuoJoystick = 0;
+  registrar(MENSAGENS[motorJoystick]);
+}
+
+static void trocarBracoJoystick(void) {
+  if (BRACOS_ATIVOS < 2) {
+    registrar("Joystick: somente um braco ativo.");
+    return;
+  }
+  bracoJoystick = (bracoJoystick + 1) % BRACOS_ATIVOS;
+  residuoJoystick = 0;
+  registrar(bracoJoystick == 0 ? "Joystick: braco 1 selecionado." : "Joystick: braco 2 selecionado.");
+}
+
 static void iniciarCiclo(void) {
   if (busy_control()) {
     registrar("Controle ocupado. Aguarde terminar ou envie parar.");
@@ -385,7 +449,19 @@ static void taskControle() {
       if (comandos & CMD_JSON) {
         processarComandosJson();
       }
-      
+
+      if (comandos & CMD_JOY_DUPLO) {
+        trocarBracoJoystick();
+      }
+
+      if (comandos & CMD_JOY_CLIQUE) {
+        trocarMotorJoystick();
+      }
+
+      if (comandos & CMD_JOY_EIXOS) {
+        moverComJoystick();
+      }
+
     }
 
     atualizarSensor();
@@ -395,7 +471,7 @@ static void taskControle() {
     
     comandoAvulsoConcluido = estavaMovendo && !emMovimento && !executando;
     if (comandoAvulsoConcluido) {
-      registrar("Comando JSON: movimento concluido.");
+      registrar("Movimento avulso concluido.");
     }
 
     atualizar();
@@ -497,6 +573,35 @@ static void task_esteira_with_ultrasonic(void *parameter) {
   }
 }
 
+// Esta tarefa somente le o joystick e avisa o controle; nunca move servos.
+static void taskJoystick(void *parameter) {
+  (void)parameter;
+  const esp_err_t inicializacao = joystick_init();
+  if (inicializacao != ESP_OK) {
+    ESP_LOGE("joystick", "Falha ao iniciar joystick: %s", esp_err_to_name(inicializacao));
+    vTaskDelete(NULL);
+    return;
+  }
+  for (;;) {
+    JoystickLeitura leitura;
+    if (joystick_ler(&leitura) == ESP_OK) {
+      uint32_t bits = 0;
+      switch (joystick_evento_botao(leitura.pressionado, tempoAtualMs())) {
+        case JOY_CLIQUE: bits |= CMD_JOY_CLIQUE; break;
+        case JOY_DUPLO_CLIQUE: bits |= CMD_JOY_DUPLO; break;
+        default: break;
+      }
+      // Com a alavanca no centro nada e enviado: o controle pode dormir.
+      if (leitura.x != 0 || leitura.y != 0) {
+        xQueueOverwrite(filaJoystick, &leitura);
+        bits |= CMD_JOY_EIXOS;
+      }
+      if (bits) xTaskNotify(controleHandle, bits, eSetBits);
+    }
+    vTaskDelay(ticks(JOY_PERIODO_MS));
+  }
+}
+
 void app_main(void) {
 
   esp_err_t ret; 
@@ -518,12 +623,14 @@ void app_main(void) {
   filaMensagens = xQueueCreate(24, sizeof(const char *));
   filaComandos = xQueueCreate(8, sizeof(ComandoJson));
   filaSensor = xQueueCreate(1, sizeof(LeituraSensor));
+  filaJoystick = xQueueCreate(1, sizeof(JoystickLeitura));
 
-  if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL) {
+  if (filaMensagens == NULL || filaComandos == NULL || filaSensor == NULL || filaJoystick == NULL) {
     if (filaMensagens) vQueueDelete(filaMensagens);
     if (filaComandos) vQueueDelete(filaComandos);
     if (filaSensor) vQueueDelete(filaSensor);
-    filaSensor = NULL;
+    if (filaJoystick) vQueueDelete(filaJoystick);
+    filaSensor = filaJoystick = NULL;
     filaMensagens = filaComandos = NULL;
     pararEsteira();
     ESP_LOGE(TAG, "Falha ao criar fila RTOS. Reinicie a ESP32.");
@@ -534,7 +641,8 @@ void app_main(void) {
     vQueueDelete(filaMensagens);
     vQueueDelete(filaComandos);
     vQueueDelete(filaSensor);
-    filaSensor = NULL;
+    vQueueDelete(filaJoystick);
+    filaSensor = filaJoystick = NULL;
     filaComandos = NULL;
     filaMensagens = NULL;
     pararEsteira();
@@ -550,6 +658,11 @@ void app_main(void) {
   // Sem produtor, sensorValido() impede ligar a esteira.
   if (xTaskCreate(task_esteira_with_ultrasonic, "Sensor", 4096, NULL, 1, NULL) != pdPASS) {
     ESP_LOGE(TAG, "Falha ao criar tarefa do sensor: etapa da esteira bloqueada.");
+  }
+
+  // Opcional: sem joystick, o controle segue pelo MQTT normalmente.
+  if (xTaskCreate(taskJoystick, "Joystick", 3072, NULL, 1, NULL) != pdPASS) {
+    ESP_LOGE(TAG, "Falha ao criar tarefa do joystick.");
   }
 
   // MQTT conecta quando o Wi-Fi recebe IP. E a unica entrada de comandos.
