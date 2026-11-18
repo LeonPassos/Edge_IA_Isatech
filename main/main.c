@@ -6,24 +6,16 @@ static const char *TAG = "main";
 static const ServoCfg cfg[4] = {
   //o de vdd é o primeiro 
   {"Base",     18, 0, 180, 90},
-  {"Ombro",    19, 0, 180, 90},
-  {"Cotovelo", 23, 0, 180, 90},
+  {"Ombro",    19, 0, 180, 150},
+  {"Cotovelo", 23, 0, 180, 50},
   {"Garra",    12, 0, 180, 90}
-  // {"Base",     16, 0, 180, 90},
-  // {"Ombro",    17, 0, 180, 90},
-  // {"Cotovelo", 21, 0, 180, 90},
-  // {"Garra",    23, 0, 180, 90}
 };
 static const ServoCfg cfgSegundoBraco[4] = {
   
   {"Base",     14, 0, 180, 90},
-  {"Ombro",    27, 0, 180, 170},
+  {"Ombro",    27, 0, 180, 150},
   {"Cotovelo", 26, 0, 180, 50},
   {"Garra",    25, 0, 180, 90}
-  // {"Base",     13, 0, 180, 90},
-  // {"Ombro",    14, 0, 180, 120},
-  // {"Cotovelo", 27, 0, 180, 30},
-  // {"Garra",    26, 0, 180, 90}
 };
 
 static const ServoCfg *const CONFIG_BRACOS[2] = {cfg, cfgSegundoBraco};
@@ -73,7 +65,8 @@ static const Etapa SEQUENCIA[] = {
   {MOVER, 0, {REPOUSO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: repouso."},
   {MOVER, 1, {REPOUSO_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: repouso."},
   {MOVER, 0, {ACIMA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: acima do cubo."},
-  {MOVER, 0, {PEGA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: descer para pegar."},
+  {MOVER, 0, {DESCER_PARA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: descer para pegar."},
+  {MOVER, 0, {PEGA_CUBO, ABERTA_1}, MOVIMENTO_MS, "Braco 1: pegar cubo."},
   {GARRA, 0, {0, 0, 0, FECHADA_1}, GARRA_MS, "Braco 1: fechar garra."},
   {MOVER, 0, {ACIMA_CUBO, FECHADA_1}, MOVIMENTO_MS, "Braco 1: levantar cubo."},
   {MOVER, 0, {ACIMA_ESTEIRA_1, FECHADA_1}, MOVIMENTO_MS, "Braco 1: acima da esteira."},
@@ -85,7 +78,7 @@ static const Etapa SEQUENCIA[] = {
   {DESLIGAR_ESTEIRA, 0, {0, 0, 0, 0}, ACOMODAR_MS, "Aguardando parada da esteira."},
   {MOVER, 1, {PARA_ESTEIRA_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: acima do cubo."},
   {MOVER, 1, {PEGA_CUBO_ESTEIRA_2, ABERTA_2}, MOVIMENTO_MS, "Braco 2: descer para pegar."},
-  {GARRA, 1, {0, 0, 0, FECHADA_2}, GARRA_MS, "Braco 2: fechar garra."},
+  {GARRA, 1, {0, 0, 0, FECHADA_2}, MOVIMENTO_MS, "Braco 2: fechar garra."},
   {MOVER, 1, {ACIMA_ESTEIRA_2, FECHADA_2}, MOVIMENTO_MS, "Braco 2: levantar cubo."},
   {MOVER, 1, {ACIMA_ESTEIRA_2, FECHADA_2}, MOVIMENTO_MS, "Braco 2: acima da saida."},
   {MOVER, 1, {ENTREGA_SAIDA, FECHADA_2}, MOVIMENTO_MS, "Braco 2: baixar cubo."},
